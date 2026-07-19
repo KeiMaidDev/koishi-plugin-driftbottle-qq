@@ -4,19 +4,23 @@ import crypto from 'crypto'
 import { pathToFileURL } from 'url'
 import path from 'path'
 import fs from 'fs'
-import { BottleContent, CommentContent, webBottle } from './webBottle'
+import { BottleContent, CommentContent, webBottle, type WebBottleData } from './webBottle'
 import {
   buildAuxiliaryMessage,
   buildCloudBottleMessages,
   buildCommentSelectionText,
-  buildHistoryText,
+  buildHistoryBundle,
   buildLocalBottleMessages,
-  buildLogText,
+  buildLogBundle,
   buildMainMenuBundle,
+  buildReportAdminBundle,
   sendBottleBundle,
   type AssetTransformer,
+  type CanvasImageLoader,
   type LogDisplayItem,
 } from './message'
+import { BottleReportRegistry, type ReportScope } from './report'
+import { createAdapterDisplayNameResolver, withAdapterDisplayNames, withoutAdapterDisplayNames } from './user-name'
 
 export const name = 'smmcat-driftbottle'
 
@@ -33,7 +37,6 @@ declare module 'koishi' {
 }
 
 export interface Config {
-  botId: string,
   adminQQ: Array<string>
   basePath: string
   dataPath: string
@@ -51,14 +54,14 @@ export interface Config {
   delOrBlur: any
   filter: Array<string>
   textfilter: Array<string>
-  onbotAvatar: boolean,
   allowDelOfAuthor: boolean,
+  reportThreshold: number
   webFilingPath: string
 }
 
 export const inject = {
   required: ['localstorage'],
-  optional: ['assets'],
+  optional: ['assets', 'canvas'],
 }
 
 export const usage = `
@@ -68,9 +71,7 @@ export const usage = `
 `
 
 export const Config: Schema<Config> = Schema.object({
-  botId: Schema.string().description('qqbot的id (由于不会写自动获取需要手动，后续版本自动)'),
   adminQQ: Schema.array(String).role('table').description('管理员QQ 可查指定id内容，删除瓶子'),
-  onbotAvatar: Schema.boolean().default(false).description('头像+网名获取兼容第三方QQ机器人适配'),
   autoCorrectionPath: Schema.boolean().default(true).description('自动矫正多媒体文件存放位置'),
   basePath: Schema.string().default('./data/smm-driftbottle').description('多媒体文件存放位置'),
   dataPath: Schema.string().default('smm-driftbottle').description('用户数据命名空间 (在 /data/localstorage 文件夹下)'),
@@ -78,6 +79,7 @@ export const Config: Schema<Config> = Schema.object({
   logsPath: Schema.string().default('smmcat-driftbottle-logs').description('用户日志的数据命名空间 (在 /data/localstorage 文件夹下)'),
   webFilingPath: Schema.string().default('smmcat-driftbottle-upload').description('用户上传到服务器的数据命名空间 (在 /data/localstorage 文件夹下)'),
   allowDelOfAuthor: Schema.boolean().default(true).description('允许漂流瓶的作者删除瓶子下的评论'),
+  reportThreshold: Schema.number().step(1).min(1).default(3).description('同一漂流瓶达到该举报数量后，主动通知管理员 QQ 审核'),
   logsNum: Schema.number().default(20).description('日志最大显示数量'),
   throwWaitTime: Schema.number().default(20000).description('扔漂流瓶的等待时间'),
   scoopWaitTime: Schema.number().default(20000).description('捞漂流瓶的等待时间'),
@@ -116,6 +118,7 @@ export type HistoryInfoList = {
   userId: string,
   id: number,
   type: '图文瓶' | '图片瓶' | '文本瓶' | '语音瓶'
+  username?: string
 }
 export  /** 漂流瓶内容 */
   type DiftContent = {
@@ -355,13 +358,10 @@ export function apply(ctx: Context, config: Config) {
           await this.updateLogsStore(session.userId)
         }
 
-        return buildAuxiliaryMessage(
-          buildLogText(items, session.platform === 'qq'),
-          session.platform,
-        )
+        await sendBottleBundle(session, buildLogBundle(items, session.platform))
       } catch (error) {
         config.deBug && console.log(error)
-        return buildAuxiliaryMessage('## 漂流瓶日志\n获取日志失败，请稍后重试。', session.platform)
+        await session.send('获取漂流瓶日志失败，请稍后重试。')
       }
     },
     /** 格式化日志事件信息 */
@@ -445,7 +445,8 @@ export function apply(ctx: Context, config: Config) {
       const eventList = fs.readdirSync(this.basePath).map((item: string) => {
         return new Promise(async (reslove, rejects) => {
           try {
-            const userTemp = JSON.parse(await ctx.localstorage.getItem(`${config.dataPath}/${item}`))
+            const userTemp = (JSON.parse(await ctx.localstorage.getItem(`${config.dataPath}/${item}`)) as DiftInfo[])
+              .map(withoutAdapterDisplayNames)
 
             if (config.autoCorrectionPath) {
               // 修复文件路径问题
@@ -909,22 +910,6 @@ export function apply(ctx: Context, config: Config) {
         return `id为 ${id} 的瓶子已被管理员清理...`
       }
 
-      // 动态获取QQ网名
-      if (config.onbotAvatar) {
-        const username = await driftbottle.getQQDetailByQQ(selectContent.userId)
-        selectContent.username = tools.sanitizeText(username || '')
-        const eventList = selectContent.review.map((item, index) => {
-          return new Promise(async (resolve, reject) => {
-            try {
-              selectContent.review[index].username = tools.sanitizeText(await driftbottle.getQQDetailByQQ(item.userId) || '')
-              resolve(true)
-            } catch (error) {
-              resolve(true)
-            }
-          })
-        })
-        await Promise.all(eventList)
-      }
       config.deBug && console.log(selectContent);
       await session.send(`指定获取id为${id}的` + this.driftbottleType(selectContent) + '\n稍等，正在为你展开内容...')
       selectContent.getCount++
@@ -932,20 +917,23 @@ export function apply(ctx: Context, config: Config) {
       await this.formatDriftContent(session, selectContent)
       return
     },
-    /** onebot 通过QQ号获取用户信息 */
-    async getQQDetailByQQ(qq: string) {
-      const res = await ctx.http.post('https://tools.mgtv100.com/external/v1/pear/qq', { qq })
-      if (res.code !== 200) return ''
-      return res.data.nickname
-    },
     /** 格式化瓶子内容 */
     async formatDriftContent(session: Session, bottle: DiftInfo): Promise<void> {
+      const displayBottle = await withAdapterDisplayNames(session, bottle)
       await sendBottleBundle(
         session,
         await buildLocalBottleMessages(
-          bottle,
+          displayBottle,
           session.platform,
           (ctx as Context & { assets?: AssetTransformer }).assets,
+          {
+            canBan: Boolean(config.adminQQ?.includes(session.userId)),
+            canDeleteComments: Boolean(
+              config.adminQQ?.includes(session.userId)
+              || (config.allowDelOfAuthor && bottle.userId === session.userId),
+            ),
+          },
+          (ctx as Context & { canvas?: CanvasImageLoader }).canvas,
         ),
       )
     },
@@ -1010,10 +998,9 @@ export function apply(ctx: Context, config: Config) {
       const userId = session.userId
       const historyData = this.historyTempList[userId]
       if (!historyData?.length) {
-        await session.send('你还没有捞过任何瓶子，请发送 /捞漂流瓶 来获取第一个瓶子吧！')
+        await sendBottleBundle(session, buildHistoryBundle([], 0, session.platform))
         return
       }
-      await session.send('稍等，正在获取用户拾取过的瓶子记录...')
       // 获取所有数据
       const allDriftbottleList = [].concat(...Object.values(this.userTempList)) as DiftInfo[]
       // 装载瓶子信息
@@ -1030,11 +1017,14 @@ export function apply(ctx: Context, config: Config) {
         }
       }).filter((item: any) => item).reverse();
       const visibleHistory = historyDetailList.slice(0, 49).filter(Boolean)
-      await session.send(
-        buildAuxiliaryMessage(
-          buildHistoryText(visibleHistory, historyDetailList.length, session.platform === 'qq'),
-          session.platform,
-        ),
+      const resolveName = createAdapterDisplayNameResolver(session)
+      const displayHistory = await Promise.all(visibleHistory.map(async item => ({
+        ...item,
+        username: await resolveName(item.userId) || undefined,
+      })))
+      await sendBottleBundle(
+        session,
+        buildHistoryBundle(displayHistory, historyDetailList.length, session.platform),
       )
     },
     /** 瓶子类型判断 */
@@ -1046,7 +1036,8 @@ export function apply(ctx: Context, config: Config) {
     },
     /** 持久化单用户数据 */
     async updateStoreUser(userId: string) {
-      const temp = this.userTempList[userId]
+      const temp = (this.userTempList[userId] || []).map(withoutAdapterDisplayNames)
+      this.userTempList[userId] = temp
       await ctx.localstorage.setItem(`${config.dataPath}/${userId}`, JSON.stringify(temp))
     },
     /** 持久化单用户数据 */
@@ -1223,10 +1214,116 @@ export function apply(ctx: Context, config: Config) {
   };
 
 
-  ctx.on('ready', () => {
-    driftbottle.init()
-    logs.init()
-    webBottle.init(ctx, config)
+  const reportRegistry = new BottleReportRegistry(
+    ctx.localstorage,
+    config.dataPath + '-reports/reports.json',
+    config.reportThreshold,
+  )
+  const cloudBottleCache = new Map<string, WebBottleData>()
+
+  const reports = {
+    rememberCloudBottle(bottle: WebBottleData) {
+      cloudBottleCache.set(String(bottle.id), bottle)
+    },
+    async notifyAdmins(session: Session, notice: Parameters<typeof buildReportAdminBundle>[0]) {
+      const admins = [...new Set((config.adminQQ || []).filter(Boolean))]
+      if (!admins.length) {
+        ctx.logger(name).warn('举报数量已达到阈值，但 adminQQ 未配置，无法发送审核通知。')
+        return false
+      }
+
+      const bundle = buildReportAdminBundle(notice, session.platform)
+      let delivered = 0
+      for (const adminId of admins) {
+        try {
+          await session.bot.sendPrivateMessage(adminId, bundle.primary)
+          delivered++
+        } catch (primaryError) {
+          try {
+            await session.bot.sendPrivateMessage(adminId, bundle.fallback)
+            delivered++
+          } catch (fallbackError) {
+            ctx.logger(name).warn(
+              fallbackError,
+              '向管理员 %s 推送漂流瓶举报审核消息失败，原始错误：%o',
+              adminId,
+              primaryError,
+            )
+          }
+        }
+      }
+      return delivered > 0
+    },
+    async submit(session: Session, rawBottleId: string, rawScope?: string) {
+      const bottleId = String(rawBottleId || '').trim()
+      if (!bottleId) return '请提供需要举报的漂流瓶 ID。'
+
+      let scope: ReportScope
+      if (!rawScope || rawScope === 'local' || rawScope === '本地') {
+        scope = 'local'
+      } else if (rawScope === 'cloud' || rawScope === '云') {
+        scope = 'cloud'
+      } else {
+        return '举报范围只能是 local（本地瓶）或 cloud（云瓶）。'
+      }
+
+      let title = ''
+      let authorId = ''
+      if (scope === 'local') {
+        const bottle = driftbottle.GetAllBottle().find(item => String(item.id) === bottleId)
+        if (!bottle) return '没有找到 ID 为 ' + bottleId + ' 的本地漂流瓶。'
+        if (!bottle.show) return '该漂流瓶已经被管理员封禁，无需重复举报。'
+        title = bottle.content.title || ''
+        authorId = bottle.userId
+      } else {
+        let bottle = cloudBottleCache.get(bottleId)
+        if (!bottle) {
+          const numericId = Number(bottleId)
+          if (!Number.isInteger(numericId) || numericId < 0) return '云漂流瓶 ID 必须是有效数字。'
+          const result = await webBottle.getWebBottleData(session, numericId)
+          if (!result.code) return '没有找到 ID 为 ' + bottleId + ' 的云漂流瓶。'
+          bottle = result.data as WebBottleData
+          reports.rememberCloudBottle(bottle)
+        }
+        title = bottle.content.title || ''
+        authorId = bottle.content.userId || bottle.userId
+      }
+
+      if (authorId && authorId === session.userId) return '不能举报自己发布的漂流瓶。'
+      const result = await reportRegistry.submit(scope, bottleId, session.userId)
+      if (result.duplicate) {
+        return '你已经举报过这个漂流瓶，请等待管理员处理。'
+      }
+
+      let notificationText = ''
+      if (result.shouldNotify) {
+        const success = await reports.notifyAdmins(session, {
+          scope,
+          bottleId,
+          reportCount: result.record.reporterIds.length,
+          threshold: config.reportThreshold,
+          reporterId: session.userId,
+          title,
+          authorId,
+        })
+        await reportRegistry.completeNotification(scope, bottleId, success)
+        notificationText = success
+          ? '\n举报数量已达到阈值，已向管理员 QQ 推送审核通知。'
+          : '\n举报数量已达到阈值，但管理员主动消息发送失败；记录已保留，后续举报会再次尝试通知。'
+      } else if (result.record.notifiedAt) {
+        notificationText = '\n该漂流瓶此前已进入管理员审核流程。'
+      } else {
+        notificationText = '\n当前举报数量：' + result.record.reporterIds.length + ' / ' + config.reportThreshold + '。'
+      }
+      return '举报成功，感谢你的反馈。' + notificationText
+    },
+  }
+
+  ctx.on('ready', async () => {
+    await driftbottle.init()
+    await logs.init()
+    await reportRegistry.init()
+    await webBottle.init(ctx, config)
   })
 
   ctx
@@ -1263,6 +1360,12 @@ export function apply(ctx: Context, config: Config) {
       }
       pid = Math.abs(Math.floor(pid))
       return await driftbottle.setReviewForCententById(session, pid, msg)
+    })
+
+  ctx
+    .command('漂流瓶/举报漂流瓶 <pid:string> [scope:string]', '举报指定漂流瓶')
+    .action(async ({ session }, pid, scope) => {
+      return await reports.submit(session, pid, scope)
     })
 
   ctx
@@ -1343,9 +1446,11 @@ export function apply(ctx: Context, config: Config) {
         return
       }
       waitLog[session.userId] = true
-      await session.send('稍等，正在获取日志信息...')
-      await session.send(await logs.getUserLogsList(session))
-      waitLog[session.userId] = false
+      try {
+        await logs.getUserLogsList(session)
+      } finally {
+        waitLog[session.userId] = false
+      }
     })
 
   ctx
@@ -1365,8 +1470,11 @@ export function apply(ctx: Context, config: Config) {
         return
       }
       historyLog[session.userId] = true
-      await driftbottle.getHistoryFormatData(session)
-      historyLog[session.userId] = false
+      try {
+        await driftbottle.getHistoryFormatData(session)
+      } finally {
+        historyLog[session.userId] = false
+      }
     })
 
   ctx
@@ -1380,12 +1488,14 @@ export function apply(ctx: Context, config: Config) {
       await session.send('稍等，正在向远处的大海祈祷...')
       const { code, data } = await webBottle.getWebBottleData(session, num)
       if (code) {
+        reports.rememberCloudBottle(data)
         await sendBottleBundle(
           session,
           await buildCloudBottleMessages(
             data,
             session.platform,
             (ctx as Context & { assets?: AssetTransformer }).assets,
+            (ctx as Context & { canvas?: CanvasImageLoader }).canvas,
           ),
         )
         return

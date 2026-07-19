@@ -1,6 +1,7 @@
 import { h, type Session } from 'koishi'
 import type { DiftInfo, HistoryInfoList } from '.'
 import type { WebBottleData } from './webBottle'
+import type { ReportScope } from './report'
 
 export interface QQKeyboardButton {
   render_data: { label: string; style: number }
@@ -23,8 +24,28 @@ export interface BottleMessageBundle {
   fallbackMedia: ReturnType<typeof h>[]
 }
 
+export interface BottleActionPermissions {
+  canBan?: boolean
+  canDeleteComments?: boolean
+}
+
 export interface AssetTransformer {
   transform(content: string): Promise<string>
+}
+
+export interface CanvasImageResource {
+  readonly naturalWidth: number
+  readonly naturalHeight: number
+  dispose(): Promise<void>
+}
+
+export interface CanvasImageLoader {
+  loadImage(source: string): Promise<CanvasImageResource>
+}
+
+export interface MarkdownImageDimensions {
+  width: number
+  height: number
 }
 
 export interface LogDisplayItem {
@@ -34,6 +55,8 @@ export interface LogDisplayItem {
 }
 
 const MARKDOWN_SPECIALS = new Set(['\\', '`', '*', '{', '}', '[', ']', '(', ')', '#', '+', '-', '.', '!', '_', '>'])
+export const QQ_MARKDOWN_IMAGE_MAX_WIDTH = 1024
+export const QQ_MARKDOWN_IMAGE_MAX_HEIGHT = 1024
 
 export function escapeQQMarkdown(value: unknown): string {
   return Array.from(String(value ?? ''), character => {
@@ -48,17 +71,29 @@ function commandButton(label: string, data: string, enter: boolean, style = 1): 
   }
 }
 
-export function createBottleKeyboard(id: string | number, scope: 'local' | 'cloud'): QQKeyboard {
+export function createBottleKeyboard(
+  id: string | number,
+  scope: ReportScope,
+  permissions: BottleActionPermissions = {},
+): QQKeyboard {
   const comment = scope === 'cloud' ? '云留言 ' + id + ' ' : '留言 ' + id + ' '
   const scoop = scope === 'cloud' ? '捞云漂流瓶' : '捞漂流瓶'
-  return {
-    content: {
-      rows: [
-        { buttons: [commandButton('留言', comment, false), commandButton('再捞一个', scoop, true)] },
-        { buttons: [commandButton('查看记录', '查看瓶子记录', true, 0)] },
+  const rows: Array<{ buttons: QQKeyboardButton[] }> = [
+    { buttons: [commandButton('留言', comment, false), commandButton('再捞一个', scoop, true)] },
+    {
+      buttons: [
+        commandButton('举报该瓶', '举报漂流瓶 ' + id + ' ' + scope, true, 0),
+        commandButton('查看记录', '查看瓶子记录', true, 0),
       ],
     },
+  ]
+  if (scope === 'local' && (permissions.canBan || permissions.canDeleteComments)) {
+    const managementButtons: QQKeyboardButton[] = []
+    if (permissions.canBan) managementButtons.push(commandButton('封禁瓶子', '封漂流瓶 ' + id, true))
+    if (permissions.canDeleteComments) managementButtons.push(commandButton('删除留言', '删留言 ' + id, true, 0))
+    rows.push({ buttons: managementButtons })
   }
+  return { content: { rows } }
 }
 
 export function createMainKeyboard(): QQKeyboard {
@@ -102,6 +137,51 @@ export async function resolveAssetImageUrl(
   }
 }
 
+export function fitMarkdownImageDimensions(
+  width: number,
+  height: number,
+  maxWidth = QQ_MARKDOWN_IMAGE_MAX_WIDTH,
+  maxHeight = QQ_MARKDOWN_IMAGE_MAX_HEIGHT,
+): MarkdownImageDimensions {
+  if (![width, height, maxWidth, maxHeight].every(value => Number.isFinite(value) && value > 0)) {
+    throw new RangeError('Image dimensions and limits must be positive finite numbers.')
+  }
+  const scale = Math.min(1, maxWidth / width, maxHeight / height)
+  return {
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale)),
+  }
+}
+
+export async function resolveMarkdownImageDimensions(
+  source: string,
+  canvas?: CanvasImageLoader,
+  fallbackSource?: string,
+): Promise<MarkdownImageDimensions> {
+  const fallback = { width: QQ_MARKDOWN_IMAGE_MAX_WIDTH, height: QQ_MARKDOWN_IMAGE_MAX_HEIGHT }
+  if (!canvas) return fallback
+
+  const candidates = [...new Set([source, fallbackSource].filter((value): value is string => Boolean(value)))]
+  for (const candidate of candidates) {
+    let image: CanvasImageResource | undefined
+    try {
+      image = await canvas.loadImage(candidate)
+      return fitMarkdownImageDimensions(image.naturalWidth, image.naturalHeight)
+    } catch {
+      // Try the Assets public URL when the original source cannot be loaded.
+    } finally {
+      if (image) {
+        try {
+          await image.dispose()
+        } catch {
+          // Dimension lookup succeeded; disposal failure must not block the bottle message.
+        }
+      }
+    }
+  }
+  return fallback
+}
+
 export function buildMarkdownImage(url: string, alt: string, width = 1024, height = 1024): string {
   const publicUrl = publicHttpUrl(url)
   if (!publicUrl) throw new TypeError('QQ Markdown image requires an absolute HTTP(S) URL.')
@@ -138,6 +218,7 @@ function audioElements(sources: readonly string[] | null | undefined): ReturnTyp
 async function resolveQqMarkdownImages(
   sources: readonly string[],
   assets: AssetTransformer | undefined,
+  canvas: CanvasImageLoader | undefined,
   failedMedia: ReturnType<typeof h>[],
   altPrefix: string,
 ): Promise<string[]> {
@@ -145,7 +226,13 @@ async function resolveQqMarkdownImages(
   for (const [index, source] of sources.entries()) {
     const publicUrl = await resolveAssetImageUrl(source, assets)
     if (publicUrl) {
-      markdownImages.push(buildMarkdownImage(publicUrl, altPrefix + ' ' + (index + 1)))
+      const dimensions = await resolveMarkdownImageDimensions(source, canvas, publicUrl)
+      markdownImages.push(buildMarkdownImage(
+        publicUrl,
+        altPrefix + ' ' + (index + 1),
+        dimensions.width,
+        dimensions.height,
+      ))
     } else {
       failedMedia.push(h.image(source))
     }
@@ -165,6 +252,8 @@ export async function buildLocalBottleMessages(
   bottle: DiftInfo,
   platform: string,
   assets?: AssetTransformer,
+  permissions: BottleActionPermissions = {},
+  canvas?: CanvasImageLoader,
 ): Promise<BottleMessageBundle> {
   const commentText = localReviewText(bottle)
   const fallbackText = [
@@ -180,6 +269,9 @@ export async function buildLocalBottleMessages(
     commentText,
     '',
     '发送“留言 ' + bottle.id + ' 你的内容”可以留言。',
+    '发送“举报漂流瓶 ' + bottle.id + ' local”可以举报。',
+    ...(permissions.canBan ? ['发送“封漂流瓶 ' + bottle.id + '”可以封禁该瓶。'] : []),
+    ...(permissions.canDeleteComments ? ['发送“删留言 ' + bottle.id + '”可以管理留言。'] : []),
   ].join('\n')
 
   const fallback = h('message', {}, [h.text(fallbackText)])
@@ -193,7 +285,7 @@ export async function buildLocalBottleMessages(
     return { primary: fallback, media: fallbackMedia, fallback, fallbackMedia }
   }
 
-  const markdownImages = await resolveQqMarkdownImages(sourceImages, assets, media, '漂流瓶图片')
+  const markdownImages = await resolveQqMarkdownImages(sourceImages, assets, canvas, media, '漂流瓶图片')
   const markdown = [
     '# ' + escapeQQMarkdown(bottle.content.title || '漂流瓶 #' + bottle.id),
     '> 编号：' + bottle.id + ' ｜ 作者：' + escapeQQMarkdown(displayName(bottle.username, bottle.userId)),
@@ -209,7 +301,7 @@ export async function buildLocalBottleMessages(
   return {
     primary: h('qq:rawmarkdown', {
       markdown: { content: markdown },
-      keyboard: createBottleKeyboard(bottle.id, 'local'),
+      keyboard: createBottleKeyboard(bottle.id, 'local', permissions),
     }),
     media,
     fallback,
@@ -221,6 +313,7 @@ export async function buildCloudBottleMessages(
   bottle: WebBottleData,
   platform: string,
   assets?: AssetTransformer,
+  canvas?: CanvasImageLoader,
 ): Promise<BottleMessageBundle> {
   const fallbackComments = bottle.review.length
     ? bottle.review.map((item, index) =>
@@ -242,6 +335,7 @@ export async function buildCloudBottleMessages(
     fallbackComments,
     '',
     '发送“云留言 ' + bottle.id + ' 你的内容”可以留言。',
+    '发送“举报漂流瓶 ' + bottle.id + ' cloud”可以举报。',
   ].join('\n')
 
   const fallback = h('message', {}, [h.text(fallbackText)])
@@ -254,8 +348,8 @@ export async function buildCloudBottleMessages(
     return { primary: fallback, media: fallbackMedia, fallback, fallbackMedia }
   }
 
-  const contentImages = await resolveQqMarkdownImages(contentSources, assets, media, '云漂流瓶图片')
-  const reviewImages = await resolveQqMarkdownImages(reviewSources, assets, media, '留言图片')
+  const contentImages = await resolveQqMarkdownImages(contentSources, assets, canvas, media, '云漂流瓶图片')
+  const reviewImages = await resolveQqMarkdownImages(reviewSources, assets, canvas, media, '留言图片')
   const markdownComments = bottle.review.length
     ? bottle.review.map((item, index) =>
       String(index + 1) + '. ' + escapeQQMarkdown(item.userId) + '：' + escapeQQMarkdown(item.text || '（无文字内容）')
@@ -284,6 +378,60 @@ export async function buildCloudBottleMessages(
     media,
     fallback,
     fallbackMedia,
+  }
+}
+
+export interface ReportAdminNotice {
+  scope: ReportScope
+  bottleId: string
+  reportCount: number
+  threshold: number
+  reporterId: string
+  title?: string
+  authorId?: string
+}
+
+function createReportReviewKeyboard(scope: ReportScope, bottleId: string): QQKeyboard {
+  const viewCommand = scope === 'cloud' ? '捞云漂流瓶 ' + bottleId : '捞漂流瓶 ' + bottleId
+  const buttons = [commandButton(scope === 'cloud' ? '查看云瓶' : '查看瓶子', viewCommand, true)]
+  if (scope === 'local') buttons.push(commandButton('封禁瓶子', '封漂流瓶 ' + bottleId, true, 0))
+  return { content: { rows: [{ buttons }] } }
+}
+
+export function buildReportAdminBundle(notice: ReportAdminNotice, platform: string): BottleMessageBundle {
+  const scopeLabel = notice.scope === 'cloud' ? '云漂流瓶' : '本地漂流瓶'
+  const fallbackText = [
+    '【漂流瓶举报审核】',
+    scopeLabel + ' #' + notice.bottleId + ' 的举报数量已达到阈值。',
+    '举报数量：' + notice.reportCount + ' / ' + notice.threshold,
+    '最近举报人：' + notice.reporterId,
+    ...(notice.title ? ['标题：' + notice.title] : []),
+    ...(notice.authorId ? ['作者：' + notice.authorId] : []),
+    '请管理员尽快查看内容并决定是否处理。',
+  ].join('\n')
+  const fallback = h('message', {}, [h.text(fallbackText)])
+  if (platform !== 'qq') {
+    return { primary: fallback, media: [], fallback, fallbackMedia: [] }
+  }
+  const markdown = [
+    '# 漂流瓶举报审核',
+    '> ' + scopeLabel + ' #' + escapeQQMarkdown(notice.bottleId) + ' 的举报数量已达到阈值。',
+    '',
+    '- 举报数量：' + notice.reportCount + ' / ' + notice.threshold,
+    '- 最近举报人：' + escapeQQMarkdown(notice.reporterId),
+    ...(notice.title ? ['- 标题：' + escapeQQMarkdown(notice.title)] : []),
+    ...(notice.authorId ? ['- 作者：' + escapeQQMarkdown(notice.authorId)] : []),
+    '',
+    '请管理员尽快查看内容并决定是否处理。',
+  ].join('\n')
+  return {
+    primary: h('qq:rawmarkdown', {
+      markdown: { content: markdown },
+      keyboard: createReportReviewKeyboard(notice.scope, notice.bottleId),
+    }),
+    media: [],
+    fallback,
+    fallbackMedia: [],
   }
 }
 
@@ -321,23 +469,153 @@ export function buildAuxiliaryMessage(content: string, platform: string): Return
   return h.text(content)
 }
 
+function historyTypeIcon(type: HistoryInfoList['type']) {
+  if (type === '语音瓶') return '🎧'
+  if (type === '图片瓶') return '🖼️'
+  if (type === '图文瓶') return '📚'
+  return '📝'
+}
+
+function createHistoryKeyboard(): QQKeyboard {
+  return {
+    content: {
+      rows: [
+        {
+          buttons: [
+            commandButton('读取指定瓶子', '捞漂流瓶 ', false),
+            commandButton('再捞一个', '捞漂流瓶', true),
+          ],
+        },
+        {
+          buttons: [
+            commandButton('查看日志', '漂流瓶日志', true, 0),
+            commandButton('返回菜单', '漂流瓶', true, 0),
+          ],
+        },
+      ],
+    },
+  }
+}
+
+function createLogKeyboard(): QQKeyboard {
+  return {
+    content: {
+      rows: [
+        {
+          buttons: [
+            commandButton('查看捞瓶记录', '查看瓶子记录', true),
+            commandButton('再捞一个', '捞漂流瓶', true),
+          ],
+        },
+        {
+          buttons: [
+            commandButton('查看生态统计', '漂流瓶统计', true, 0),
+            commandButton('返回菜单', '漂流瓶', true, 0),
+          ],
+        },
+      ],
+    },
+  }
+}
+
 export function buildLogText(items: LogDisplayItem[], markdown: boolean): string {
-  if (!items.length) return '## 漂流瓶日志\n暂无日志'
-  return ['## 漂流瓶日志', ...items.map((item, index) => {
-    const marker = item.isNew ? '新' : '已读'
-    const info = markdown ? escapeQQMarkdown(item.info) : item.info
-    return String(index + 1) + '. [' + marker + '] ' + formatTime(item.time) + '  ' + info
-  })].join('\n')
+  if (!markdown) {
+    if (!items.length) return '【漂流瓶日志】\n当前没有任何日志。'
+    return [
+      '【漂流瓶日志】',
+      '本次显示最近 ' + items.length + ' 条日志。',
+      '',
+      ...items.flatMap((item, index) => [
+        String(index + 1) + '. ' + (item.isNew ? '[新消息]' : '[已读]') + ' ' + formatTime(item.time),
+        '   ' + item.info,
+      ]),
+    ].join('\n')
+  }
+
+  if (!items.length) {
+    return [
+      '# 漂流瓶日志',
+      '> 当前没有任何日志，去大海里进行一次操作后再来看看吧。',
+    ].join('\n')
+  }
+  return [
+    '# 漂流瓶日志',
+    '> 本次显示最近 ' + items.length + ' 条日志；打开后未读日志会自动标记为已读。',
+    '',
+    '---',
+    '',
+    ...items.flatMap((item, index) => [
+      '### ' + (index + 1) + '. ' + (item.isNew ? '🆕 新消息' : '✅ 已读'),
+      '> ' + escapeQQMarkdown(formatTime(item.time)),
+      escapeQQMarkdown(item.info),
+      '',
+    ]),
+  ].join('\n').trimEnd()
 }
 
 export function buildHistoryText(items: HistoryInfoList[], total: number, markdown: boolean): string {
+  if (!markdown) {
+    if (!items.length) return '【捞瓶记录】\n你还没有捞到过任何漂流瓶。'
+    return [
+      '【捞瓶记录】',
+      '当前显示最近 ' + items.length + ' / ' + total + ' 条。',
+      '',
+      ...items.map((item, index) =>
+        String(index + 1) + '. ' + item.type + ' #' + item.id + '（发布者：' + displayName(item.username, item.userId) + '）'
+      ),
+    ].join('\n')
+  }
+
+  if (!items.length) {
+    return [
+      '# 捞瓶记录',
+      '> 你还没有捞到过任何漂流瓶，点击下方“再捞一个”开始第一次打捞吧。',
+    ].join('\n')
+  }
   return [
-    '## 捞瓶历史',
-    '> 显示 ' + items.length + ' / ' + total + ' 条',
-    ...(items.length ? items.map((item, index) =>
-      String(index + 1) + '. ' + (markdown ? escapeQQMarkdown(item.type) : item.type) + ' #' + item.id
-    ) : ['暂无记录']),
-  ].join('\n')
+    '# 捞瓶记录',
+    '> 已记录 ' + total + ' 条，当前显示最近 ' + items.length + ' 条。',
+    '',
+    '---',
+    '',
+    ...items.flatMap((item, index) => [
+      '### ' + (index + 1) + '. ' + historyTypeIcon(item.type) + ' ' + escapeQQMarkdown(item.type) + ' #' + item.id,
+      '> 发布者：' + escapeQQMarkdown(displayName(item.username, item.userId)),
+      '',
+    ]),
+  ].join('\n').trimEnd()
+}
+
+export function buildLogBundle(items: LogDisplayItem[], platform: string): BottleMessageBundle {
+  const fallback = h('message', {}, [h.text(buildLogText(items, false))])
+  if (platform !== 'qq') return { primary: fallback, media: [], fallback, fallbackMedia: [] }
+  return {
+    primary: h('qq:rawmarkdown', {
+      markdown: { content: buildLogText(items, true) },
+      keyboard: createLogKeyboard(),
+    }),
+    media: [],
+    fallback,
+    fallbackMedia: [],
+  }
+}
+
+export function buildHistoryBundle(
+  items: HistoryInfoList[],
+  total: number,
+  platform: string,
+): BottleMessageBundle {
+  const fallback = h('message', {}, [h.text(buildHistoryText(items, total, false))])
+  if (platform !== 'qq') return { primary: fallback, media: [], fallback, fallbackMedia: [] }
+  return {
+    primary: h('qq:rawmarkdown', {
+      markdown: { content: buildHistoryText(items, total, true) },
+      keyboard: createHistoryKeyboard(),
+    }),
+    media: [],
+    fallback,
+    fallbackMedia: [],
+  }
 }
 
 export function buildCommentSelectionText(bottle: DiftInfo, markdown: boolean): string {
