@@ -304,12 +304,6 @@ export function buildMainMenuBundle(platform: string): BottleMessageBundle {
   const markdown = [
     '# 漂流瓶',
     '> 点击下方按钮选择操作，也可以继续直接发送原命令。',
-    '',
-    '## 本地大海',
-    '- 捞取或投放保存在当前 Koishi 实例中的漂流瓶。',
-    '',
-    '## 云端大海',
-    '- 捞取或投放能够跨机器人流转的云漂流瓶。',
   ].join('\n')
   return {
     primary: h('qq:rawmarkdown', {
