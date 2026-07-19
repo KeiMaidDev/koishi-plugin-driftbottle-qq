@@ -61,6 +61,18 @@ export function createBottleKeyboard(id: string | number, scope: 'local' | 'clou
   }
 }
 
+export function createMainKeyboard(): QQKeyboard {
+  return {
+    content: {
+      rows: [
+        { buttons: [commandButton('捞漂流瓶', '捞漂流瓶', true), commandButton('扔漂流瓶', '扔漂流瓶 ', false)] },
+        { buttons: [commandButton('捞云漂流瓶', '捞云漂流瓶', true), commandButton('扔云漂流瓶', '扔云漂流瓶 ', false)] },
+        { buttons: [commandButton('查看记录', '查看瓶子记录', true, 0), commandButton('查看日志', '漂流瓶日志', true, 0)] },
+      ],
+    },
+  }
+}
+
 function publicHttpUrl(value: string): string | null {
   try {
     const url = new URL(value)
@@ -90,11 +102,14 @@ export async function resolveAssetImageUrl(
   }
 }
 
-export function buildMarkdownImage(url: string, alt: string): string {
+export function buildMarkdownImage(url: string, alt: string, width = 1024, height = 1024): string {
   const publicUrl = publicHttpUrl(url)
   if (!publicUrl) throw new TypeError('QQ Markdown image requires an absolute HTTP(S) URL.')
+  if (!Number.isInteger(width) || width <= 0 || !Number.isInteger(height) || height <= 0) {
+    throw new RangeError('QQ Markdown image dimensions must be positive integers.')
+  }
   const safeUrl = publicUrl.replaceAll('(', '%28').replaceAll(')', '%29')
-  return '![' + escapeQQMarkdown(alt) + '](' + safeUrl + ')'
+  return '![' + escapeQQMarkdown(alt) + ' #' + width + 'px #' + height + 'px](' + safeUrl + ')'
 }
 
 function formatTime(value: number | string): string {
@@ -269,6 +284,41 @@ export async function buildCloudBottleMessages(
     media,
     fallback,
     fallbackMedia,
+  }
+}
+
+export function buildMainMenuBundle(platform: string): BottleMessageBundle {
+  const fallbackText = [
+    '【漂流瓶】',
+    '捞漂流瓶：从本地大海随机获取一个瓶子',
+    '扔漂流瓶：发布本地漂流瓶',
+    '捞云漂流瓶：从云端大海获取瓶子',
+    '扔云漂流瓶：发布云端漂流瓶',
+    '查看瓶子记录：查看自己捞到过的瓶子',
+    '漂流瓶日志：查看漂流瓶事件日志',
+  ].join('\n')
+  const fallback = h('message', {}, [h.text(fallbackText)])
+  if (platform !== 'qq') {
+    return { primary: fallback, media: [], fallback, fallbackMedia: [] }
+  }
+  const markdown = [
+    '# 漂流瓶',
+    '> 点击下方按钮选择操作，也可以继续直接发送原命令。',
+    '',
+    '## 本地大海',
+    '- 捞取或投放保存在当前 Koishi 实例中的漂流瓶。',
+    '',
+    '## 云端大海',
+    '- 捞取或投放能够跨机器人流转的云漂流瓶。',
+  ].join('\n')
+  return {
+    primary: h('qq:rawmarkdown', {
+      markdown: { content: markdown },
+      keyboard: createMainKeyboard(),
+    }),
+    media: [],
+    fallback,
+    fallbackMedia: [],
   }
 }
 

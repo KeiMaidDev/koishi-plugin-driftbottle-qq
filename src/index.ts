@@ -12,6 +12,7 @@ import {
   buildHistoryText,
   buildLocalBottleMessages,
   buildLogText,
+  buildMainMenuBundle,
   sendBottleBundle,
   type AssetTransformer,
   type LogDisplayItem,
@@ -1229,7 +1230,10 @@ export function apply(ctx: Context, config: Config) {
   })
 
   ctx
-    .command('漂流瓶')
+    .command('漂流瓶', '查看漂流瓶功能菜单')
+    .action(async ({ session }) => {
+      await sendBottleBundle(session, buildMainMenuBundle(session.platform))
+    })
 
   ctx
     .command('漂流瓶/捞漂流瓶 <num:number>', '从大海中随机获得一个瓶子')
@@ -1411,7 +1415,7 @@ export function apply(ctx: Context, config: Config) {
           await session.send('需要为该瓶子进行配图吗？请在20秒内发送图片作为补充内容\n不需要则发：否')
           let imgTemp = await session.prompt(20000)
           if (imgTemp !== undefined && imgTemp.trim() !== '否') {
-            imgList = imgTemp ? h.select(imgTemp, 'img').map((item) => h.image(item.attrs.src)) : []
+            imgList = imgTemp ? h.select(imgTemp, 'img').map((item) => item.attrs.src) : []
             // 添加图片
             if (imgList.length == 0) {
               await session.send('(；′⌒`) 啊...没检测到图片，图片上传失败')

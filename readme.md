@@ -4,9 +4,9 @@
 
 ## 消息兼容
 
-- QQ：漂流瓶主体使用 `qq:rawmarkdown`，操作入口使用下挂 Keyboard。
+- QQ：`漂流瓶` 主命令和漂流瓶主体均使用 `qq:rawmarkdown`，操作入口使用下挂 Keyboard。
 - 其他适配器：自动降级为普通文本、图片和音频消息。
-- QQ 图片优先通过 Koishi Assets 服务生成公网直链并内嵌 Raw Markdown。
+- QQ 图片优先通过 Koishi Assets 服务生成公网直链，并使用带宽度、高度参数的原生 Markdown 图片语法。
 - Assets 未安装、转存失败或没有公网 HTTP(S) 地址时，图片自动降级为 Koishi 标准图片消息。
 
 ## 依赖
