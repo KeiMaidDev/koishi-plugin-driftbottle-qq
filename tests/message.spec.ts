@@ -9,6 +9,7 @@ import {
   buildLogBundle,
   buildReportAdminBundle,
   buildMainMenuBundle,
+  buildStatisticsBundle,
   buildMarkdownImage,
   createBottleKeyboard,
   createMainKeyboard,
@@ -16,7 +17,7 @@ import {
   resolveMarkdownImageDimensions,
 } from '../src/message'
 import { BottleReportRegistry } from '../src/report'
-import { createAdapterDisplayNameResolver, pickAdapterDisplayName, withAdapterDisplayNames, withoutAdapterDisplayNames } from '../src/user-name'
+import { createAdapterDisplayNameResolver, fetchQqNicknameFromUapis, isNumericQqUserId, pickAdapterDisplayName, withAdapterDisplayNames, withoutAdapterDisplayNames } from '../src/user-name'
 
 test('QQ markdown image preserves supplied dimensions and oversized images keep their aspect ratio', () => {
   assert.equal(
@@ -71,6 +72,59 @@ test('local QQ bottle uses mapped Assets URL and does not resend the embedded im
   assert.equal(bundle.media.some(element => element.type === 'img'), false)
   assert.deepEqual(loadedSources, ['file:///C:/data/a.jpg'])
   assert.equal(disposed, 1)
+})
+
+test('local bottle renders comment images and hides images from deleted comments', async () => {
+  const transformedSources: string[] = []
+  const bottle: DiftInfo = {
+    id: 14,
+    style: 0,
+    content: {
+      creatTime: 1_700_000_000_000,
+      text: '本地瓶',
+      image: null,
+      audio: null,
+      title: '留言图片测试',
+    },
+    getCount: 1,
+    show: true,
+    userId: 'author',
+    review: [
+      {
+        creatTime: 1_700_000_000_001,
+        text: '有图留言',
+        image: ['file:///C:/data/comment.jpg'],
+        userId: 'commenter',
+      },
+      {
+        creatTime: 1_700_000_000_002,
+        text: '已删除留言',
+        image: ['file:///C:/data/deleted.jpg'],
+        userId: 'deleted-user',
+        isDel: true,
+      },
+    ],
+  }
+  const bundle = await buildLocalBottleMessages(bottle, 'qq', {
+    async transform(content: string) {
+      const source = h.parse(content)[0].attrs.src as string
+      transformedSources.push(source)
+      return h.image('https://assets.example/' + source.split('/').at(-1)).toString()
+    },
+  }, {}, {
+    async loadImage() {
+      return { naturalWidth: 400, naturalHeight: 300, async dispose() {} }
+    },
+  })
+  const markdown = bundle.primary.attrs.markdown.content
+  assert.equal(markdown.includes('![留言 1 图片 1 #400px #300px](https://assets.example/comment.jpg)'), true)
+  assert.equal(markdown.includes('管理员已删除该条评论'), true)
+  assert.equal(markdown.includes('deleted.jpg'), false)
+  assert.deepEqual(transformedSources, ['file:///C:/data/comment.jpg'])
+  assert.deepEqual(
+    bundle.fallbackMedia.filter(element => element.type === 'img').map(element => element.attrs.src),
+    ['file:///C:/data/comment.jpg'],
+  )
 })
 
 test('Canvas dimension lookup retries the Assets URL and safely falls back when loading fails', async () => {
@@ -134,7 +188,7 @@ test('cloud QQ bottle uses Canvas dimensions for content and comment images', as
   })
   const markdown = bundle.primary.attrs.markdown.content
   assert.equal(markdown.includes('![云漂流瓶图片 1 #1024px #512px](https://assets.example/content.jpg)'), true)
-  assert.equal(markdown.includes('![留言图片 1 #640px #480px](https://assets.example/comment.jpg)'), true)
+  assert.equal(markdown.includes('![留言 1 图片 1 #640px #480px](https://assets.example/comment.jpg)'), true)
 })
 
 test('non-QQ bottles do not invoke Assets or Canvas image services', async () => {
@@ -151,7 +205,12 @@ test('non-QQ bottles do not invoke Assets or Canvas image services', async () =>
     getCount: 0,
     show: true,
     userId: '10001',
-    review: [],
+    review: [{
+      creatTime: 1_700_000_000_001,
+      text: '图片留言',
+      image: ['file:///C:/data/comment.jpg'],
+      userId: 'commenter',
+    }],
   }
   const bundle = await buildLocalBottleMessages(bottle, 'discord', {
     async transform() { throw new Error('Assets should not be called') },
@@ -159,7 +218,10 @@ test('non-QQ bottles do not invoke Assets or Canvas image services', async () =>
     async loadImage() { throw new Error('Canvas should not be called') },
   })
   assert.equal(bundle.primary.type, 'message')
-  assert.equal(bundle.media.some(element => element.type === 'img'), true)
+  assert.deepEqual(
+    bundle.media.filter(element => element.type === 'img').map(element => element.attrs.src),
+    ['file:///C:/data/a.jpg', 'file:///C:/data/comment.jpg'],
+  )
 })
 
 test('bottle keyboard exposes report and role-based management actions', () => {
@@ -295,6 +357,120 @@ test('adapter display name resolver prefers member names and keeps stored IDs un
 
   const resolveName = createAdapterDisplayNameResolver(session as never)
   assert.equal(await resolveName('viewer'), '当前查看者')
+})
+
+test('statistics query uses QQ markdown card and navigation keyboard', () => {
+  const bundle = buildStatisticsBundle({
+    total: 12,
+    hidden: 2,
+    neverScooped: 3,
+    reviewTotal: 18,
+    own: 4,
+    reviewed: 5,
+    typeCounts: { '图文瓶': 7, '文本瓶': 5 },
+  }, 'qq')
+  assert.equal(bundle.primary.type, 'qq:rawmarkdown')
+  const markdown = bundle.primary.attrs.markdown.content
+  assert.equal(markdown.includes('# 漂流瓶生态统计'), true)
+  assert.equal(markdown.includes('可打捞：**10** 个'), true)
+  assert.equal(markdown.includes('📚 图文瓶：**7** 个'), true)
+  assert.equal(markdown.includes('我扔出的瓶子：**4** 个'), true)
+  const rows = bundle.primary.attrs.keyboard.content.rows
+  assert.equal(rows[0].buttons[0].action.data, '捞漂流瓶')
+  assert.equal(rows[0].buttons[1].action.data, '扔漂流瓶 ')
+  assert.equal(rows[0].buttons[1].action.enter, false)
+  assert.equal(rows[1].buttons[0].action.data, '查看瓶子记录')
+  assert.equal(rows[2].buttons[0].action.data, '漂流瓶')
+
+  const fallback = buildStatisticsBundle({
+    total: 0,
+    hidden: 0,
+    neverScooped: 0,
+    reviewTotal: 0,
+    own: 0,
+    reviewed: 0,
+    typeCounts: {},
+  }, 'onebot')
+  assert.equal(fallback.primary.type, 'message')
+  assert.deepEqual(fallback.primary.children.map(element => element.type), ['img', 'text'])
+})
+
+test('numeric QQ IDs use the uapis HTTP endpoint only when adapter names are unavailable', async () => {
+  assert.equal(isNumericQqUserId('qq', '123456789'), true)
+  assert.equal(isNumericQqUserId('onebot', '123456789'), true)
+  assert.equal(isNumericQqUserId('discord', '123456789'), false)
+  assert.equal(isNumericQqUserId('qq', 'user-123'), false)
+
+  let apiCalls = 0
+  const session = {
+    platform: 'qq',
+    guildId: 'guild-1',
+    userId: 'viewer',
+    bot: {
+      ctx: {
+        http: {
+          async get(url: string, config: { params: Record<string, string>, headers: Record<string, string>, timeout: number }) {
+            apiCalls++
+            assert.equal(url, 'https://uapis.cn/api/v1/social/qq/userinfo')
+            assert.deepEqual(config.params, { qq: '246813579' })
+            assert.deepEqual(config.headers, { Authorization: 'Bearer test-api-key' })
+            assert.equal(config.timeout, 5000)
+            return { nickname: '<b>Uapis 昵称</b>', nick: '备用昵称' }
+          },
+        },
+      },
+      async getGuildMember(_guildId: string, userId: string) {
+        return { name: userId }
+      },
+      async getUser(userId: string) {
+        return { name: userId }
+      },
+    },
+  }
+  const resolveName = createAdapterDisplayNameResolver(session as never, 'test-api-key')
+  assert.equal(await resolveName('246813579'), 'Uapis 昵称')
+  assert.equal(await resolveName('246813579'), 'Uapis 昵称')
+  assert.equal(apiCalls, 1)
+
+  let preferredApiCalls = 0
+  const preferredSession = {
+    ...session,
+    bot: {
+      ...session.bot,
+      ctx: {
+        http: {
+          async get() {
+            preferredApiCalls++
+            return { nickname: 'API 昵称' }
+          },
+        },
+      },
+      async getGuildMember() {
+        return { nick: '适配器昵称' }
+      },
+    },
+  }
+  assert.equal(
+    await createAdapterDisplayNameResolver(preferredSession as never, 'test-api-key')('135792468'),
+    '适配器昵称',
+  )
+  assert.equal(preferredApiCalls, 0)
+
+  assert.equal(await fetchQqNicknameFromUapis('not-a-qq', 'test-api-key', {
+    async get() { throw new Error('must not call HTTP for a non-numeric ID') },
+  }), '')
+  let guestCalls = 0
+  assert.equal(await fetchQqNicknameFromUapis('1122334455', '', {
+    async get(url: string, config: { params: Record<string, string>, headers?: Record<string, string>, timeout: number }) {
+      guestCalls++
+      assert.equal(url, 'https://uapis.cn/api/v1/social/qq/userinfo')
+      assert.deepEqual(config.params, { qq: '1122334455' })
+      assert.equal(config.headers, undefined)
+      assert.equal(config.timeout, 5000)
+      return { nick: '访客昵称' }
+    },
+  }), '访客昵称')
+  assert.equal(guestCalls, 1)
 })
 
 test('history query uses formatted QQ markdown and navigation keyboard', () => {

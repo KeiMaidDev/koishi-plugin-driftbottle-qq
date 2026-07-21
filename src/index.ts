@@ -14,6 +14,7 @@ import {
   buildLogBundle,
   buildMainMenuBundle,
   buildReportAdminBundle,
+  buildStatisticsBundle,
   sendBottleBundle,
   type AssetTransformer,
   type CanvasImageLoader,
@@ -38,6 +39,7 @@ declare module 'koishi' {
 
 export interface Config {
   adminQQ: Array<string>
+  uapisApiKey?: string
   basePath: string
   dataPath: string
   autoCorrectionPath: boolean
@@ -72,6 +74,7 @@ export const usage = `
 
 export const Config: Schema<Config> = Schema.object({
   adminQQ: Schema.array(String).role('table').description('管理员QQ 可查指定id内容，删除瓶子'),
+  uapisApiKey: Schema.string().role('secret').default('').description('可选的 Uapis API Key，填写后使用 Bearer 鉴权查询纯数字 QQ ID 昵称'),
   autoCorrectionPath: Schema.boolean().default(true).description('自动矫正多媒体文件存放位置'),
   basePath: Schema.string().default('./data/smm-driftbottle').description('多媒体文件存放位置'),
   dataPath: Schema.string().default('smm-driftbottle').description('用户数据命名空间 (在 /data/localstorage 文件夹下)'),
@@ -919,7 +922,7 @@ export function apply(ctx: Context, config: Config) {
     },
     /** 格式化瓶子内容 */
     async formatDriftContent(session: Session, bottle: DiftInfo): Promise<void> {
-      const displayBottle = await withAdapterDisplayNames(session, bottle)
+      const displayBottle = await withAdapterDisplayNames(session, bottle, config.uapisApiKey)
       await sendBottleBundle(
         session,
         await buildLocalBottleMessages(
@@ -948,7 +951,7 @@ export function apply(ctx: Context, config: Config) {
       const typeList: string[] = []
 
       // 统计队列
-      let reviewTotal = allContent.map((item) => {
+      const reviewTotal = allContent.map((item) => {
         if (!item.show) {
           hiddenContent.push(item)
         }
@@ -965,7 +968,7 @@ export function apply(ctx: Context, config: Config) {
         return item.review.length
       }).reduce((a, b) => a + b, 0)
 
-      const typeKey = {}
+      const typeKey: Record<string, number> = {}
       typeList.forEach((item) => {
         if (!typeKey[item]) {
           typeKey[item] = 0
@@ -973,25 +976,15 @@ export function apply(ctx: Context, config: Config) {
         typeKey[item]++
       })
 
-      const text =
-        `截至到现在的数据如下:` +
-        `\n\n【海的数据】\n` +
-        `茫茫大海中已经存在有${allContent.length}个漂流瓶...` +
-        (hiddenContent.length ? `\n不过有${hiddenContent.length}个瓶子已经被沉入海底，不能获取。` : '')
-        + (lostContent.length ? `\n有${lostContent.length}从未被捞到过...` : '') +
-        `\n\n【瓶子数据】\n` +
-        Object.keys(typeKey).map((item) => {
-          return `${item}存在${typeKey[item]}个;`
-        }).join('\n') +
-        (reviewTotal ? `\n有${reviewTotal}条评论数据;` : '\n还没有任何评论内容;')
-        + `\n\n【我的数据】\n` +
-        (myContent.length ? `至此，你已经丢过${myContent.length}个漂流瓶。\n` : '至此，你还没扔过任何一个漂流瓶。\n') +
-        (reviewContent.length ? `你一共评论过${reviewContent.length}个漂流瓶\n` : '你却也还没评论过任何一个漂流瓶。')
-
-      return h('message', {}, [
-        h.image('https://smmcat.cn/run/plp.jpg'),
-        h.text(text),
-      ])
+      return buildStatisticsBundle({
+        total: allContent.length,
+        hidden: hiddenContent.length,
+        neverScooped: lostContent.length,
+        reviewTotal,
+        own: myContent.length,
+        reviewed: reviewContent.length,
+        typeCounts: typeKey,
+      }, session.platform)
     },
     /** 获取用户历史获取瓶子记录 */
     async getHistoryFormatData(session: Session) {
@@ -1017,7 +1010,7 @@ export function apply(ctx: Context, config: Config) {
         }
       }).filter((item: any) => item).reverse();
       const visibleHistory = historyDetailList.slice(0, 49).filter(Boolean)
-      const resolveName = createAdapterDisplayNameResolver(session)
+      const resolveName = createAdapterDisplayNameResolver(session, config.uapisApiKey)
       const displayHistory = await Promise.all(visibleHistory.map(async item => ({
         ...item,
         username: await resolveName(item.userId) || undefined,
@@ -1432,7 +1425,7 @@ export function apply(ctx: Context, config: Config) {
   ctx
     .command('漂流瓶/漂流瓶统计', '对瓶子生态进行统计')
     .action(async ({ session }) => {
-      return driftbottle.driftbottleTatistics(session)
+      await sendBottleBundle(session, driftbottle.driftbottleTatistics(session))
     })
 
   const waitLog = {}

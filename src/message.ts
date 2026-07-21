@@ -54,6 +54,16 @@ export interface LogDisplayItem {
   isNew: boolean
 }
 
+export interface BottleStatistics {
+  total: number
+  hidden: number
+  neverScooped: number
+  reviewTotal: number
+  own: number
+  reviewed: number
+  typeCounts: Record<string, number>
+}
+
 const MARKDOWN_SPECIALS = new Set(['\\', '`', '*', '{', '}', '[', ']', '(', ')', '#', '+', '-', '.', '!', '_', '>'])
 export const QQ_MARKDOWN_IMAGE_MAX_WIDTH = 1024
 export const QQ_MARKDOWN_IMAGE_MAX_HEIGHT = 1024
@@ -276,8 +286,12 @@ export async function buildLocalBottleMessages(
 
   const fallback = h('message', {}, [h.text(fallbackText)])
   const sourceImages = (bottle.content.image || []).filter(Boolean)
+  const reviewSources = bottle.review
+    .filter(item => !item.isDel)
+    .flatMap(item => (item.image || []).filter(Boolean))
   const fallbackMedia = [
     ...imageElements(sourceImages),
+    ...imageElements(reviewSources),
     ...audioElements(bottle.content.audio),
   ]
   const media = [...audioElements(bottle.content.audio)]
@@ -286,6 +300,28 @@ export async function buildLocalBottleMessages(
   }
 
   const markdownImages = await resolveQqMarkdownImages(sourceImages, assets, canvas, media, '漂流瓶图片')
+  const markdownReviews: string[] = []
+  if (!bottle.review.length) {
+    markdownReviews.push('暂无留言')
+  } else {
+    for (const [index, item] of bottle.review.entries()) {
+      const content = item.isDel ? '管理员已删除该条评论' : item.text || '（无文字内容）'
+      markdownReviews.push(escapeQQMarkdown(
+        String(index + 1) + '. ' + displayName(item.username, item.userId || '匿名') + '：' + content,
+      ))
+      if (!item.isDel) {
+        const images = await resolveQqMarkdownImages(
+          (item.image || []).filter(Boolean),
+          assets,
+          canvas,
+          media,
+          '留言 ' + (index + 1) + ' 图片',
+        )
+        if (images.length) markdownReviews.push(...images)
+      }
+      if (index < bottle.review.length - 1) markdownReviews.push('')
+    }
+  }
   const markdown = [
     '# ' + escapeQQMarkdown(bottle.content.title || '漂流瓶 #' + bottle.id),
     '> 编号：' + bottle.id + ' ｜ 作者：' + escapeQQMarkdown(displayName(bottle.username, bottle.userId)),
@@ -295,7 +331,7 @@ export async function buildLocalBottleMessages(
     ...(markdownImages.length ? ['', ...markdownImages] : []),
     '',
     '## 留言',
-    escapeQQMarkdown(commentText),
+    ...markdownReviews,
   ].join('\n')
 
   return {
@@ -349,12 +385,25 @@ export async function buildCloudBottleMessages(
   }
 
   const contentImages = await resolveQqMarkdownImages(contentSources, assets, canvas, media, '云漂流瓶图片')
-  const reviewImages = await resolveQqMarkdownImages(reviewSources, assets, canvas, media, '留言图片')
-  const markdownComments = bottle.review.length
-    ? bottle.review.map((item, index) =>
-      String(index + 1) + '. ' + escapeQQMarkdown(item.userId) + '：' + escapeQQMarkdown(item.text || '（无文字内容）')
-    ).join('\n')
-    : '暂无留言'
+  const markdownComments: string[] = []
+  if (!bottle.review.length) {
+    markdownComments.push('暂无留言')
+  } else {
+    for (const [index, item] of bottle.review.entries()) {
+      markdownComments.push(
+        String(index + 1) + '. ' + escapeQQMarkdown(item.userId) + '：' + escapeQQMarkdown(item.text || '（无文字内容）'),
+      )
+      const images = await resolveQqMarkdownImages(
+        (item.image || []).filter(Boolean),
+        assets,
+        canvas,
+        media,
+        '留言 ' + (index + 1) + ' 图片',
+      )
+      if (images.length) markdownComments.push(...images)
+      if (index < bottle.review.length - 1) markdownComments.push('')
+    }
+  }
 
   const markdown = [
     '# ' + escapeQQMarkdown(bottle.content.title || '云漂流瓶 #' + bottle.id),
@@ -366,8 +415,7 @@ export async function buildCloudBottleMessages(
     ...(contentImages.length ? ['', ...contentImages] : []),
     '',
     '## 留言',
-    markdownComments,
-    ...(reviewImages.length ? ['', ...reviewImages] : []),
+    ...markdownComments,
   ].join('\n')
 
   return {
@@ -474,6 +522,95 @@ function historyTypeIcon(type: HistoryInfoList['type']) {
   if (type === '图片瓶') return '🖼️'
   if (type === '图文瓶') return '📚'
   return '📝'
+}
+
+function statisticsTypeIcon(type: string): string {
+  if (type === '语音瓶') return '🎧'
+  if (type === '图片瓶') return '🖼️'
+  if (type === '图文瓶') return '📚'
+  return '📝'
+}
+
+function createStatisticsKeyboard(): QQKeyboard {
+  return {
+    content: {
+      rows: [
+        {
+          buttons: [
+            commandButton('再捞一个', '捞漂流瓶', true),
+            commandButton('扔漂流瓶', '扔漂流瓶 ', false),
+          ],
+        },
+        {
+          buttons: [
+            commandButton('查看记录', '查看瓶子记录', true, 0),
+            commandButton('查看日志', '漂流瓶日志', true, 0),
+          ],
+        },
+        { buttons: [commandButton('返回菜单', '漂流瓶', true, 0)] },
+      ],
+    },
+  }
+}
+
+export function buildStatisticsText(statistics: BottleStatistics, markdown: boolean): string {
+  const available = Math.max(0, statistics.total - statistics.hidden)
+  const typeEntries = Object.entries(statistics.typeCounts)
+  if (!markdown) {
+    return [
+      '【漂流瓶生态统计】',
+      '海中共有 ' + statistics.total + ' 个漂流瓶，当前可打捞 ' + available + ' 个。',
+      '已沉入海底：' + statistics.hidden + ' 个',
+      '从未被捞到：' + statistics.neverScooped + ' 个',
+      '留言总数：' + statistics.reviewTotal + ' 条',
+      '',
+      '【瓶子类型】',
+      ...(typeEntries.length
+        ? typeEntries.map(([type, count]) => type + '：' + count + ' 个')
+        : ['暂无瓶子数据']),
+      '',
+      '【我的足迹】',
+      '我扔出的瓶子：' + statistics.own + ' 个',
+      '我留言过的瓶子：' + statistics.reviewed + ' 个',
+    ].join('\n')
+  }
+
+  return [
+    '# 漂流瓶生态统计',
+    '> 当前本地大海共记录 ' + statistics.total + ' 个漂流瓶。',
+    '',
+    '## 🌊 海域概览',
+    '- 可打捞：**' + available + '** 个',
+    '- 已沉入海底：**' + statistics.hidden + '** 个',
+    '- 从未被捞到：**' + statistics.neverScooped + '** 个',
+    '- 留言总数：**' + statistics.reviewTotal + '** 条',
+    '',
+    '## 🧴 瓶子类型',
+    ...(typeEntries.length
+      ? typeEntries.map(([type, count]) => '- ' + statisticsTypeIcon(type) + ' ' + escapeQQMarkdown(type) + '：**' + count + '** 个')
+      : ['> 暂无瓶子数据。']),
+    '',
+    '## 👤 我的足迹',
+    '- 我扔出的瓶子：**' + statistics.own + '** 个',
+    '- 我留言过的瓶子：**' + statistics.reviewed + '** 个',
+  ].join('\n')
+}
+
+export function buildStatisticsBundle(statistics: BottleStatistics, platform: string): BottleMessageBundle {
+  const fallback = h('message', {}, [
+    h.image('https://smmcat.cn/run/plp.jpg'),
+    h.text(buildStatisticsText(statistics, false)),
+  ])
+  if (platform !== 'qq') return { primary: fallback, media: [], fallback, fallbackMedia: [] }
+  return {
+    primary: h('qq:rawmarkdown', {
+      markdown: { content: buildStatisticsText(statistics, true) },
+      keyboard: createStatisticsKeyboard(),
+    }),
+    media: [],
+    fallback,
+    fallbackMedia: [],
+  }
 }
 
 function createHistoryKeyboard(): QQKeyboard {

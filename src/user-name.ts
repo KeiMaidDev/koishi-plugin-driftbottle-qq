@@ -9,6 +9,25 @@ interface AdapterUserLike {
   user?: AdapterUserLike
 }
 
+interface QqNicknameHttpClient {
+  get(url: string, config?: {
+    params?: Record<string, string>
+    headers?: Record<string, string>
+    timeout?: number
+  }): Promise<unknown>
+}
+
+interface UapisQqUserInfo {
+  nickname?: unknown
+  nick?: unknown
+  data?: UapisQqUserInfo
+}
+
+const UAPIS_QQ_USERINFO_URL = 'https://uapis.cn/api/v1/social/qq/userinfo'
+const QQ_NICKNAME_CACHE_TTL = 60 * 60 * 1000
+const QQ_PLATFORMS = new Set(['qq', 'onebot'])
+const qqNicknameCache = new Map<string, { expiresAt: number, value: Promise<string> }>()
+
 function sanitizeDisplayName(value: unknown): string {
   if (typeof value !== 'string') return ''
   return value
@@ -40,22 +59,63 @@ export function pickAdapterDisplayName(...sources: Array<AdapterUserLike | null 
   return ''
 }
 
-export function createAdapterDisplayNameResolver(session: Session) {
+function pickUapisQqNickname(response: unknown): string {
+  if (!response || typeof response !== 'object') return ''
+  const payload = response as UapisQqUserInfo
+  const data = payload.data && typeof payload.data === 'object' ? payload.data : payload
+  return sanitizeDisplayName(data.nickname) || sanitizeDisplayName(data.nick)
+}
+
+export function isNumericQqUserId(platform: string, userId: string): boolean {
+  return QQ_PLATFORMS.has(platform) && /^\d+$/.test(userId)
+}
+
+export async function fetchQqNicknameFromUapis(
+  userId: string,
+  apiKey = '',
+  http?: QqNicknameHttpClient,
+): Promise<string> {
+  const token = apiKey.trim()
+  if (!http || !/^\d+$/.test(userId)) return ''
+  const now = Date.now()
+  const cached = qqNicknameCache.get(userId)
+  if (cached && cached.expiresAt > now) return await cached.value
+
+  const value = (async () => {
+    try {
+      const response = await http.get(UAPIS_QQ_USERINFO_URL, {
+        params: { qq: userId },
+        ...(token ? { headers: { Authorization: 'Bearer ' + token } } : {}),
+        timeout: 5000,
+      })
+      return pickUapisQqNickname(response)
+    } catch {
+      return ''
+    }
+  })()
+  qqNicknameCache.set(userId, { expiresAt: now + QQ_NICKNAME_CACHE_TTL, value })
+  return await value
+}
+
+export function createAdapterDisplayNameResolver(session: Session, uapisApiKey = '') {
   const cache = new Map<string, Promise<string>>()
   return async (userId: string): Promise<string> => {
     const key = session.platform + ':' + (session.guildId || '') + ':' + userId
     if (!cache.has(key)) {
       cache.set(key, (async () => {
+        let adapterFallback = ''
         if (userId === session.userId) {
           const currentName = pickAdapterDisplayName(session.author)
-          if (currentName) return currentName
+          if (currentName && currentName !== userId) return currentName
+          adapterFallback ||= currentName
         }
 
         if (session.guildId) {
           try {
             const member = await session.bot.getGuildMember(session.guildId, userId)
             const memberName = pickAdapterDisplayName(member)
-            if (memberName) return memberName
+            if (memberName && memberName !== userId) return memberName
+            adapterFallback ||= memberName
           } catch {
             // Some adapters do not implement guild member lookup.
           }
@@ -63,10 +123,19 @@ export function createAdapterDisplayNameResolver(session: Session) {
 
         try {
           const user = await session.bot.getUser(userId, session.guildId)
-          return pickAdapterDisplayName(user)
+          const userName = pickAdapterDisplayName(user)
+          if (userName && userName !== userId) return userName
+          adapterFallback ||= userName
         } catch {
-          return ''
+          // Continue with the QQ nickname API fallback.
         }
+
+        if (isNumericQqUserId(session.platform, userId)) {
+          const http = (session.bot.ctx as unknown as { http?: QqNicknameHttpClient }).http
+          const apiName = await fetchQqNicknameFromUapis(userId, uapisApiKey, http)
+          if (apiName) return apiName
+        }
+        return adapterFallback
       })())
     }
     return await cache.get(key)!
@@ -89,9 +158,13 @@ export function withoutAdapterDisplayNames(bottle: DiftInfo): DiftInfo {
   }
 }
 
-export async function withAdapterDisplayNames(session: Session, bottle: DiftInfo): Promise<DiftInfo> {
+export async function withAdapterDisplayNames(
+  session: Session,
+  bottle: DiftInfo,
+  uapisApiKey = '',
+): Promise<DiftInfo> {
   const storedBottle = withoutAdapterDisplayNames(bottle)
-  const resolveName = createAdapterDisplayNameResolver(session)
+  const resolveName = createAdapterDisplayNameResolver(session, uapisApiKey)
   const [username, review] = await Promise.all([
     resolveName(storedBottle.userId),
     Promise.all(storedBottle.review.map(async item => ({
