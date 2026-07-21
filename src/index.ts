@@ -18,6 +18,7 @@ import {
   sendBottleBundle,
   type AssetTransformer,
   type CanvasImageLoader,
+  type BottleStatistics,
   type LogDisplayItem,
 } from './message'
 import { BottleReportRegistry, type ReportScope } from './report'
@@ -951,8 +952,8 @@ export function apply(ctx: Context, config: Config) {
         ),
       )
     },
-    /** 漂流瓶统计 */
-    driftbottleTatistics(session: Session) {
+    /** 获取漂流瓶统计数据 */
+    getDriftbottleStatistics(session: Session): BottleStatistics {
       const allContent: DiftInfo[] = [].concat(...Object.values(this.userTempList))
 
       const hiddenContent: DiftInfo[] = [] // 封禁的瓶子
@@ -987,7 +988,7 @@ export function apply(ctx: Context, config: Config) {
         typeKey[item]++
       })
 
-      return buildStatisticsBundle({
+      return {
         total: allContent.length,
         hidden: hiddenContent.length,
         neverScooped: lostContent.length,
@@ -995,7 +996,11 @@ export function apply(ctx: Context, config: Config) {
         own: myContent.length,
         reviewed: reviewContent.length,
         typeCounts: typeKey,
-      }, session.platform)
+      }
+    },
+    /** 漂流瓶统计 */
+    driftbottleTatistics(session: Session) {
+      return buildStatisticsBundle(this.getDriftbottleStatistics(session), session.platform)
     },
     /** 获取用户历史获取瓶子记录 */
     async getHistoryFormatData(session: Session) {
@@ -1339,7 +1344,10 @@ export function apply(ctx: Context, config: Config) {
   ctx
     .command('漂流瓶', '查看漂流瓶功能菜单')
     .action(async ({ session }) => {
-      await sendBottleBundle(session, buildMainMenuBundle(session.platform))
+      await sendBottleBundle(
+        session,
+        buildMainMenuBundle(session.platform, driftbottle.getDriftbottleStatistics(session)),
+      )
     })
 
   ctx

@@ -445,6 +445,8 @@ test('statistics query uses QQ markdown card and navigation keyboard', () => {
   const markdown = bundle.primary.attrs.markdown.content
   assert.equal(markdown.includes('# 漂流瓶生态统计'), true)
   assert.equal(markdown.includes('可打捞：**10** 个'), true)
+  assert.equal(markdown.includes('## 🧴 瓶子类型'), true)
+  assert.equal(markdown.includes('## 👤 我的足迹'), true)
   assert.equal(markdown.includes('📚 图文瓶：**7** 个'), true)
   assert.equal(markdown.includes('我扔出的瓶子：**4** 个'), true)
   const rows = bundle.primary.attrs.keyboard.content.rows
@@ -724,15 +726,43 @@ test('log query uses card-style QQ markdown and navigation keyboard', () => {
   assert.equal(buildLogBundle([], 'discord').primary.type, 'message')
 })
 
-test('main command uses QQ markdown with a six-button keyboard', () => {
+test('main command shows sea statistics with a dedicated statistics button', () => {
   const keyboard = createMainKeyboard()
   assert.deepEqual(keyboard.content.rows.flatMap(row => row.buttons).map(button => button.render_data.label), [
-    '捞漂流瓶', '扔漂流瓶', '捞云漂流瓶', '扔云漂流瓶', '查看记录', '查看日志',
+    '捞漂流瓶', '扔漂流瓶', '捞云漂流瓶', '扔云漂流瓶', '查看记录', '查看日志', '漂流瓶统计',
   ])
   assert.equal(keyboard.content.rows[0].buttons[1].action.data, '扔漂流瓶 ')
   assert.equal(keyboard.content.rows[0].buttons[1].action.enter, false)
   assert.equal(keyboard.content.rows[1].buttons[1].action.data, '扔云漂流瓶 ')
   assert.equal(keyboard.content.rows[1].buttons[1].action.enter, false)
-  assert.equal(buildMainMenuBundle('qq').primary.type, 'qq:rawmarkdown')
-  assert.equal(buildMainMenuBundle('onebot').primary.type, 'message')
+  assert.equal(keyboard.content.rows[3].buttons[0].action.data, '漂流瓶统计')
+  assert.equal(keyboard.content.rows[3].buttons[0].action.enter, true)
+
+  const statistics = {
+    total: 12,
+    hidden: 2,
+    neverScooped: 3,
+    reviewTotal: 18,
+    own: 4,
+    reviewed: 5,
+    typeCounts: { '图文瓶': 7, '文本瓶': 5 },
+  }
+  const qqMenu = buildMainMenuBundle('qq', statistics)
+  assert.equal(qqMenu.primary.type, 'qq:rawmarkdown')
+  const markdown = qqMenu.primary.attrs.markdown.content
+  assert.equal(markdown.includes('# 漂流瓶'), true)
+  assert.equal(markdown.includes('## 🌊 当前海域'), true)
+  assert.equal(markdown.includes('漂流瓶总数：**12** 个'), true)
+  assert.equal(markdown.includes('可打捞：**10** 个'), true)
+  assert.equal(markdown.includes('## 🧴 瓶子类型'), false)
+  assert.equal(markdown.includes('## 👤 我的足迹'), false)
+  assert.equal(markdown.includes('📚 图文瓶：**7** 个'), false)
+  assert.equal(markdown.includes('我扔出的瓶子：**4** 个'), false)
+
+  const fallback = buildMainMenuBundle('onebot', statistics)
+  assert.equal(fallback.primary.type, 'message')
+  assert.equal(fallback.primary.children[0].attrs.content.includes('【当前海域统计】'), true)
+  assert.equal(fallback.primary.children[0].attrs.content.includes('可打捞：10 个'), true)
+  assert.equal(fallback.primary.children[0].attrs.content.includes('图文瓶：7 个'), false)
+  assert.equal(fallback.primary.children[0].attrs.content.includes('我扔出的瓶子：4 个'), false)
 })

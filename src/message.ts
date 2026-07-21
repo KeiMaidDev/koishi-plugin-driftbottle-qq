@@ -155,6 +155,7 @@ export function createMainKeyboard(): QQKeyboard {
         { buttons: [commandButton('捞漂流瓶', '捞漂流瓶', true), commandButton('扔漂流瓶', '扔漂流瓶 ', false)] },
         { buttons: [commandButton('捞云漂流瓶', '捞云漂流瓶', true), commandButton('扔云漂流瓶', '扔云漂流瓶 ', false)] },
         { buttons: [commandButton('查看记录', '查看瓶子记录', true, 0), commandButton('查看日志', '漂流瓶日志', true, 0)] },
+        { buttons: [commandButton('漂流瓶统计', '漂流瓶统计', true, 0)] },
       ],
     },
   }
@@ -531,9 +532,36 @@ export function buildReportAdminBundle(notice: ReportAdminNotice, platform: stri
   }
 }
 
-export function buildMainMenuBundle(platform: string): BottleMessageBundle {
+function buildMainMenuStatisticsText(statistics: BottleStatistics, markdown: boolean): string {
+  const available = Math.max(0, statistics.total - statistics.hidden)
+  if (!markdown) {
+    return [
+      '【当前海域统计】',
+      '漂流瓶总数：' + statistics.total + ' 个',
+      '可打捞：' + available + ' 个',
+      '已沉入海底：' + statistics.hidden + ' 个',
+      '从未被捞到：' + statistics.neverScooped + ' 个',
+      '留言总数：' + statistics.reviewTotal + ' 条',
+    ].join('\n')
+  }
+
+  return [
+    '## 🌊 当前海域',
+    '- 漂流瓶总数：**' + statistics.total + '** 个',
+    '- 可打捞：**' + available + '** 个',
+    '- 已沉入海底：**' + statistics.hidden + '** 个',
+    '- 从未被捞到：**' + statistics.neverScooped + '** 个',
+    '- 留言总数：**' + statistics.reviewTotal + '** 条',
+  ].join('\n')
+}
+
+export function buildMainMenuBundle(
+  platform: string,
+  statistics?: BottleStatistics,
+): BottleMessageBundle {
   const fallbackText = [
     '【漂流瓶】',
+    ...(statistics ? [buildMainMenuStatisticsText(statistics, false), ''] : []),
     '捞漂流瓶：从本地大海随机获取一个瓶子',
     '扔漂流瓶：发布本地漂流瓶',
     '捞云漂流瓶：从云端大海获取瓶子',
@@ -548,6 +576,7 @@ export function buildMainMenuBundle(platform: string): BottleMessageBundle {
   const markdown = [
     '# 漂流瓶',
     '> 点击下方按钮选择操作，也可以继续直接发送原命令。',
+    ...(statistics ? ['', buildMainMenuStatisticsText(statistics, true)] : []),
   ].join('\n')
   return {
     primary: h('qq:rawmarkdown', {
