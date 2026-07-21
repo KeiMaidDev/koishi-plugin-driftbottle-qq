@@ -12,7 +12,7 @@
 - 插件不再需要手动填写 `botId` 配置；云端协议数据中的 `botId` 仍由运行时自动识别和维护。
 - 本地瓶作者和留言用户的展示名称优先读取当前适配器提供的群昵称或用户名称，查询失败时回退显示用户 ID。
 - QQ/OneBot 平台遇到纯数字 QQ ID，且适配器未提供有效昵称时，会通过 [Uapis QQ 用户信息接口](https://uapis.cn/docs/api-reference/get-social-qq-userinfo) 查询昵称；`uapisApiKey` 为可选配置。
-- Uapis 回退仅使用 Koishi HTTP 直接请求官方 API，未引入该站提供的 npm 包。配置密钥时附加 `Authorization: Bearer <API Key>` 请求头；未配置时仍会直接请求。请求失败时回退显示 QQ ID。
+- Uapis 回退仅使用 Koishi HTTP 直接请求官方 API，未引入该站提供的 npm 包。配置密钥时附加 `Authorization: Bearer <API Key>` 请求头；未配置时仍会直接请求。`uapisCacheMinutes` 控制昵称缓存分钟数，默认 `60`，设为 `0` 时禁用缓存。请求失败时不缓存空结果并回退显示 QQ ID。
 - 名称只在构造消息时临时补全，漂流瓶和留言持久化数据仍只保存用户 ID；旧版本遗留的 `username` 字段会在加载或保存时清理。
 - 旧的 `onbotAvatar` 配置和第三方 QQ 昵称查询接口已删除。
 - 其他适配器：自动降级为普通文本、图片和音频消息。

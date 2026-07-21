@@ -471,6 +471,57 @@ test('numeric QQ IDs use the uapis HTTP endpoint only when adapter names are una
     },
   }), '访客昵称')
   assert.equal(guestCalls, 1)
+
+  let retryCalls = 0
+  const retryHttp = {
+    async get() {
+      retryCalls++
+      if (retryCalls === 1) throw new Error('temporary Uapis failure')
+      return { data: { nickname: '恢复后昵称' } }
+    },
+  }
+  assert.equal(await fetchQqNicknameFromUapis('9988776655', '', retryHttp), '')
+  assert.equal(await fetchQqNicknameFromUapis('9988776655', '', retryHttp), '恢复后昵称')
+  assert.equal(retryCalls, 2)
+
+  const explicitHttpSession = {
+    platform: 'qq',
+    userId: 'viewer',
+    bot: {
+      ctx: {},
+      async getUser(userId: string) { return { name: userId } },
+    },
+  }
+  const numericBottle: DiftInfo = {
+    id: 31,
+    style: 0,
+    content: { creatTime: 1_700_000_000_000, text: '正文', image: null, audio: null, title: null },
+    getCount: 0,
+    show: true,
+    userId: '8877665544',
+    review: [],
+  }
+  const displayBottle = await withAdapterDisplayNames(
+    explicitHttpSession as never,
+    numericBottle,
+    '',
+    {
+      async get() { return { body: { nickname: '显式 HTTP 昵称' } } },
+    },
+  )
+  assert.equal(displayBottle.username, '显式 HTTP 昵称')
+  assert.equal(numericBottle.username, undefined)
+
+  let noCacheCalls = 0
+  const noCacheHttp = {
+    async get() {
+      noCacheCalls++
+      return { nickname: '不缓存昵称' }
+    },
+  }
+  assert.equal(await fetchQqNicknameFromUapis('7766554433', '', noCacheHttp, 0), '不缓存昵称')
+  assert.equal(await fetchQqNicknameFromUapis('7766554433', '', noCacheHttp, 0), '不缓存昵称')
+  assert.equal(noCacheCalls, 2)
 })
 
 test('history query uses formatted QQ markdown and navigation keyboard', () => {

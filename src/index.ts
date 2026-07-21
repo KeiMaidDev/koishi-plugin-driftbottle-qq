@@ -40,6 +40,7 @@ declare module 'koishi' {
 export interface Config {
   adminQQ: Array<string>
   uapisApiKey?: string
+  uapisCacheMinutes?: number
   basePath: string
   dataPath: string
   autoCorrectionPath: boolean
@@ -75,6 +76,7 @@ export const usage = `
 export const Config: Schema<Config> = Schema.object({
   adminQQ: Schema.array(String).role('table').description('管理员QQ 可查指定id内容，删除瓶子'),
   uapisApiKey: Schema.string().role('secret').default('').description('可选的 Uapis API Key，填写后使用 Bearer 鉴权查询纯数字 QQ ID 昵称'),
+  uapisCacheMinutes: Schema.number().min(0).step(1).default(60).description('Uapis QQ 昵称缓存时长（分钟），设为 0 可禁用缓存'),
   autoCorrectionPath: Schema.boolean().default(true).description('自动矫正多媒体文件存放位置'),
   basePath: Schema.string().default('./data/smm-driftbottle').description('多媒体文件存放位置'),
   dataPath: Schema.string().default('smm-driftbottle').description('用户数据命名空间 (在 /data/localstorage 文件夹下)'),
@@ -922,7 +924,13 @@ export function apply(ctx: Context, config: Config) {
     },
     /** 格式化瓶子内容 */
     async formatDriftContent(session: Session, bottle: DiftInfo): Promise<void> {
-      const displayBottle = await withAdapterDisplayNames(session, bottle, config.uapisApiKey)
+      const displayBottle = await withAdapterDisplayNames(
+        session,
+        bottle,
+        config.uapisApiKey,
+        ctx.http,
+        Math.max(0, config.uapisCacheMinutes ?? 60) * 60_000,
+      )
       await sendBottleBundle(
         session,
         await buildLocalBottleMessages(
@@ -1010,7 +1018,12 @@ export function apply(ctx: Context, config: Config) {
         }
       }).filter((item: any) => item).reverse();
       const visibleHistory = historyDetailList.slice(0, 49).filter(Boolean)
-      const resolveName = createAdapterDisplayNameResolver(session, config.uapisApiKey)
+      const resolveName = createAdapterDisplayNameResolver(
+        session,
+        config.uapisApiKey,
+        ctx.http,
+        Math.max(0, config.uapisCacheMinutes ?? 60) * 60_000,
+      )
       const displayHistory = await Promise.all(visibleHistory.map(async item => ({
         ...item,
         username: await resolveName(item.userId) || undefined,
