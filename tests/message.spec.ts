@@ -4,6 +4,7 @@ import { h } from 'koishi'
 import type { DiftInfo } from '../src'
 import {
   buildCloudBottleMessages,
+  buildCommentSelectionText,
   buildHistoryBundle,
   buildLocalBottleMessages,
   buildLogBundle,
@@ -13,6 +14,7 @@ import {
   buildMarkdownImage,
   createBottleKeyboard,
   createMainKeyboard,
+  escapeQQMarkdownWithLinks,
   fitMarkdownImageDimensions,
   resolveMarkdownImageDimensions,
 } from '../src/message'
@@ -31,6 +33,66 @@ test('QQ markdown image preserves supplied dimensions and oversized images keep 
     () => buildMarkdownImage('https://assets.example/bottle.jpg', '漂流瓶图片', 0, 1024),
     RangeError,
   )
+})
+
+test('bottle markdown keeps HTTP links unescaped while escaping surrounding markdown', async () => {
+  assert.equal(
+    escapeQQMarkdownWithLinks('*链接* https://example.com/a_(b)?x=1&y=2。'),
+    '\\*链接\\* https://example.com/a_(b)?x=1&y=2。',
+  )
+
+  const localBottle: DiftInfo = {
+    id: 19,
+    style: 0,
+    content: {
+      creatTime: 1_700_000_000_000,
+      text: '正文 https://example.com/path?a=1&b=2。',
+      image: null,
+      audio: null,
+      title: '链接测试',
+    },
+    getCount: 0,
+    show: true,
+    userId: 'author',
+    review: [{
+      creatTime: 1_700_000_000_001,
+      text: '留言 https://comment.example/path.',
+      image: null,
+      userId: 'commenter',
+    }],
+  }
+  const localMarkdown = (await buildLocalBottleMessages(localBottle, 'qq')).primary.attrs.markdown.content
+  assert.equal(localMarkdown.includes('https://example.com/path?a=1&b=2。'), true)
+  assert.equal(localMarkdown.includes('https://comment.example/path.'), true)
+  assert.equal(localMarkdown.includes('https://example\\.com'), false)
+  assert.equal(localMarkdown.includes('https://comment\\.example'), false)
+
+  const cloudMarkdown = (await buildCloudBottleMessages({
+    id: 'cloud-link',
+    content: {
+      createTime: 1_700_000_000_000,
+      text: '云瓶 https://cloud.example/content',
+      title: '云瓶链接',
+      image: null,
+      userId: 'author',
+    },
+    review: [{
+      createTime: 1_700_000_000_001,
+      text: '云留言 https://cloud.example/comment',
+      userId: 'commenter',
+      botId: 'bot',
+      platform: 'qq',
+      image: null,
+    }],
+    userId: 'author',
+    botId: 'bot',
+    show: true,
+    getCount: 0,
+    platform: 'qq',
+  }, 'qq')).primary.attrs.markdown.content
+  assert.equal(cloudMarkdown.includes('https://cloud.example/content'), true)
+  assert.equal(cloudMarkdown.includes('https://cloud.example/comment'), true)
+  assert.equal(cloudMarkdown.includes('https://cloud\\.example'), false)
 })
 
 test('local QQ bottle uses mapped Assets URL and does not resend the embedded image', async () => {
@@ -74,7 +136,7 @@ test('local QQ bottle uses mapped Assets URL and does not resend the embedded im
   assert.equal(disposed, 1)
 })
 
-test('local bottle renders comment images and hides images from deleted comments', async () => {
+test('local bottle hides deleted comments and caps comment images at 600 by 600', async () => {
   const transformedSources: string[] = []
   const bottle: DiftInfo = {
     id: 14,
@@ -92,16 +154,16 @@ test('local bottle renders comment images and hides images from deleted comments
     review: [
       {
         creatTime: 1_700_000_000_001,
-        text: '有图留言',
-        image: ['file:///C:/data/comment.jpg'],
-        userId: 'commenter',
-      },
-      {
-        creatTime: 1_700_000_000_002,
         text: '已删除留言',
         image: ['file:///C:/data/deleted.jpg'],
         userId: 'deleted-user',
         isDel: true,
+      },
+      {
+        creatTime: 1_700_000_000_002,
+        text: '有图留言',
+        image: ['file:///C:/data/comment.jpg'],
+        userId: 'commenter',
       },
     ],
   }
@@ -113,18 +175,24 @@ test('local bottle renders comment images and hides images from deleted comments
     },
   }, {}, {
     async loadImage() {
-      return { naturalWidth: 400, naturalHeight: 300, async dispose() {} }
+      return { naturalWidth: 1200, naturalHeight: 900, async dispose() {} }
     },
   })
   const markdown = bundle.primary.attrs.markdown.content
-  assert.equal(markdown.includes('![留言 1 图片 1 #400px #300px](https://assets.example/comment.jpg)'), true)
-  assert.equal(markdown.includes('管理员已删除该条评论'), true)
+  assert.equal(markdown.includes('![留言 1 图片 1 #600px #450px](https://assets.example/comment.jpg)'), true)
+  assert.equal(markdown.includes('管理员已删除该条评论'), false)
+  assert.equal(markdown.includes('已删除留言'), false)
+  assert.equal(markdown.includes('deleted-user'), false)
   assert.equal(markdown.includes('deleted.jpg'), false)
   assert.deepEqual(transformedSources, ['file:///C:/data/comment.jpg'])
   assert.deepEqual(
     bundle.fallbackMedia.filter(element => element.type === 'img').map(element => element.attrs.src),
     ['file:///C:/data/comment.jpg'],
   )
+  const selection = buildCommentSelectionText(bottle, true)
+  assert.equal(selection.includes('已删除留言'), false)
+  assert.equal(selection.includes('deleted-user'), false)
+  assert.equal(selection.includes('1. commenter：有图留言'), true)
 })
 
 test('Canvas dimension lookup retries the Assets URL and safely falls back when loading fails', async () => {
@@ -146,6 +214,10 @@ test('Canvas dimension lookup retries the Assets URL and safely falls back when 
   assert.deepEqual(await resolveMarkdownImageDimensions('broken', {
     async loadImage() { throw new Error('broken image') },
   }), { width: 1024, height: 1024 })
+  assert.deepEqual(
+    await resolveMarkdownImageDimensions('comment-without-canvas', undefined, undefined, 600, 600),
+    { width: 600, height: 600 },
+  )
 })
 
 test('cloud QQ bottle uses Canvas dimensions for content and comment images', async () => {
@@ -188,7 +260,7 @@ test('cloud QQ bottle uses Canvas dimensions for content and comment images', as
   })
   const markdown = bundle.primary.attrs.markdown.content
   assert.equal(markdown.includes('![云漂流瓶图片 1 #1024px #512px](https://assets.example/content.jpg)'), true)
-  assert.equal(markdown.includes('![留言 1 图片 1 #640px #480px](https://assets.example/comment.jpg)'), true)
+  assert.equal(markdown.includes('![留言 1 图片 1 #600px #450px](https://assets.example/comment.jpg)'), true)
 })
 
 test('non-QQ bottles do not invoke Assets or Canvas image services', async () => {
@@ -522,6 +594,104 @@ test('numeric QQ IDs use the uapis HTTP endpoint only when adapter names are una
   assert.equal(await fetchQqNicknameFromUapis('7766554433', '', noCacheHttp, 0), '不缓存昵称')
   assert.equal(await fetchQqNicknameFromUapis('7766554433', '', noCacheHttp, 0), '不缓存昵称')
   assert.equal(noCacheCalls, 2)
+})
+
+test('resolved nicknames are stored in the Koishi user database without mutating bottle storage', async () => {
+  let storedName = ''
+  let apiCalls = 0
+  let createdUsers = 0
+  let setCalls = 0
+  const database = {
+    async getUser(platform: string, pid: string) {
+      assert.equal(platform, 'qq')
+      assert.equal(pid, '6655443322')
+      return storedName ? { id: 7, name: storedName } : undefined
+    },
+    async setUser(platform: string, pid: string, data: { name: string }) {
+      assert.equal(platform, 'qq')
+      assert.equal(pid, '6655443322')
+      setCalls++
+      storedName = data.name
+    },
+  }
+  const session = {
+    platform: 'qq',
+    userId: 'viewer',
+    async getUser(userId: string, fields: string[]) {
+      assert.equal(userId, '6655443322')
+      assert.deepEqual(fields, ['id', 'name'])
+      createdUsers++
+      return { id: 7, name: '' }
+    },
+    bot: {
+      ctx: {},
+      async getUser(userId: string) { return { name: userId } },
+    },
+  }
+  const bottle: DiftInfo = {
+    id: 32,
+    style: 0,
+    content: { creatTime: 1_700_000_000_000, text: 'database test', image: null, audio: null, title: null },
+    getCount: 0,
+    show: true,
+    userId: '6655443322',
+    review: [],
+  }
+  const http = {
+    async get() {
+      apiCalls++
+      return { nickname: '数据库昵称' }
+    },
+  }
+
+  const displayBottle = await withAdapterDisplayNames(
+    session as never,
+    bottle,
+    '',
+    http,
+    0,
+    database,
+  )
+  assert.equal(displayBottle.username, '数据库昵称')
+  assert.equal(bottle.username, undefined)
+  assert.equal(storedName, '数据库昵称')
+  assert.equal(createdUsers, 1)
+  assert.equal(setCalls, 1)
+  assert.equal(apiCalls, 1)
+
+  const resolveStoredName = createAdapterDisplayNameResolver(
+    session as never,
+    '',
+    {
+      async get() {
+        apiCalls++
+        throw new Error('database name should avoid Uapis')
+      },
+    },
+    0,
+    database,
+  )
+  assert.equal(await resolveStoredName('6655443322'), '数据库昵称')
+  assert.equal(apiCalls, 1)
+
+  const failingDatabase = {
+    async getUser() { return { id: 9, name: '' } },
+    async setUser() { throw new Error('database unavailable') },
+  }
+  const visibleName = await createAdapterDisplayNameResolver(
+    {
+      ...session,
+      bot: {
+        ctx: {},
+        async getUser(userId: string) { return { name: userId } },
+      },
+    } as never,
+    '',
+    { async get() { return { nickname: '写入失败仍显示' } } },
+    0,
+    failingDatabase,
+  )('5544332211')
+  assert.equal(visibleName, '写入失败仍显示')
 })
 
 test('history query uses formatted QQ markdown and navigation keyboard', () => {

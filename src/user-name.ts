@@ -17,6 +17,15 @@ export interface QqNicknameHttpClient {
   }): Promise<unknown>
 }
 
+export interface KoishiUserDatabase {
+  getUser(
+    platform: string,
+    pid: string,
+    fields?: string[],
+  ): Promise<{ id?: number, name?: string } | undefined>
+  setUser(platform: string, pid: string, data: { name: string }): Promise<void>
+}
+
 interface UapisQqUserInfo {
   nickname?: unknown
   nick?: unknown
@@ -109,11 +118,55 @@ export async function fetchQqNicknameFromUapis(
   return nickname
 }
 
+async function readKoishiUserName(
+  session: Session,
+  userId: string,
+  database?: KoishiUserDatabase,
+): Promise<string> {
+  if (!database) return ''
+  try {
+    const user = await database.getUser(session.platform, userId, ['name'])
+    const name = sanitizeDisplayName(user?.name)
+    return name && name !== userId ? name : ''
+  } catch {
+    // The database is optional and must not block bottle display.
+    return ''
+  }
+}
+
+async function writeKoishiUserName(
+  session: Session,
+  userId: string,
+  nickname: string,
+  database?: KoishiUserDatabase,
+): Promise<void> {
+  const name = sanitizeDisplayName(nickname)
+  if (!database || !name || name === userId) return
+
+  try {
+    let user = await database.getUser(session.platform, userId, ['id', 'name'])
+    if (!user) {
+      const created = await session.getUser(userId, ['id', 'name']) as {
+        id?: number
+        name?: string
+        $detached?: boolean
+      }
+      if (!created?.id || created.$detached) return
+      user = created
+    }
+    if (sanitizeDisplayName(user.name) === name) return
+    await database.setUser(session.platform, userId, { name })
+  } catch {
+    // Nickname persistence is best-effort and must not block bottle display.
+  }
+}
+
 export function createAdapterDisplayNameResolver(
   session: Session,
   uapisApiKey = '',
   http?: QqNicknameHttpClient,
   cacheTtlMs = DEFAULT_QQ_NICKNAME_CACHE_TTL,
+  database?: KoishiUserDatabase,
 ) {
   const cache = new Map<string, Promise<string>>()
   return async (userId: string): Promise<string> => {
@@ -123,7 +176,10 @@ export function createAdapterDisplayNameResolver(
         let adapterFallback = ''
         if (userId === session.userId) {
           const currentName = pickAdapterDisplayName(session.author)
-          if (currentName && currentName !== userId) return currentName
+          if (currentName && currentName !== userId) {
+            await writeKoishiUserName(session, userId, currentName, database)
+            return currentName
+          }
           adapterFallback ||= currentName
         }
 
@@ -131,7 +187,10 @@ export function createAdapterDisplayNameResolver(
           try {
             const member = await session.bot.getGuildMember(session.guildId, userId)
             const memberName = pickAdapterDisplayName(member)
-            if (memberName && memberName !== userId) return memberName
+            if (memberName && memberName !== userId) {
+              await writeKoishiUserName(session, userId, memberName, database)
+              return memberName
+            }
             adapterFallback ||= memberName
           } catch {
             // Some adapters do not implement guild member lookup.
@@ -141,16 +200,25 @@ export function createAdapterDisplayNameResolver(
         try {
           const user = await session.bot.getUser(userId, session.guildId)
           const userName = pickAdapterDisplayName(user)
-          if (userName && userName !== userId) return userName
+          if (userName && userName !== userId) {
+            await writeKoishiUserName(session, userId, userName, database)
+            return userName
+          }
           adapterFallback ||= userName
         } catch {
-          // Continue with the QQ nickname API fallback.
+          // Continue with the Koishi database and QQ nickname API fallbacks.
         }
+
+        const storedName = await readKoishiUserName(session, userId, database)
+        if (storedName) return storedName
 
         if (isNumericQqUserId(session.platform, userId)) {
           const httpClient = http || (session.bot.ctx as unknown as { http?: QqNicknameHttpClient }).http
           const apiName = await fetchQqNicknameFromUapis(userId, uapisApiKey, httpClient, cacheTtlMs)
-          if (apiName) return apiName
+          if (apiName) {
+            await writeKoishiUserName(session, userId, apiName, database)
+            return apiName
+          }
         }
         return adapterFallback
       })())
@@ -181,9 +249,10 @@ export async function withAdapterDisplayNames(
   uapisApiKey = '',
   http?: QqNicknameHttpClient,
   cacheTtlMs = DEFAULT_QQ_NICKNAME_CACHE_TTL,
+  database?: KoishiUserDatabase,
 ): Promise<DiftInfo> {
   const storedBottle = withoutAdapterDisplayNames(bottle)
-  const resolveName = createAdapterDisplayNameResolver(session, uapisApiKey, http, cacheTtlMs)
+  const resolveName = createAdapterDisplayNameResolver(session, uapisApiKey, http, cacheTtlMs, database)
   const [username, review] = await Promise.all([
     resolveName(storedBottle.userId),
     Promise.all(storedBottle.review.map(async item => ({

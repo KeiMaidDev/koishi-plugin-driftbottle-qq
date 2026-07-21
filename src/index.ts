@@ -21,7 +21,7 @@ import {
   type LogDisplayItem,
 } from './message'
 import { BottleReportRegistry, type ReportScope } from './report'
-import { createAdapterDisplayNameResolver, withAdapterDisplayNames, withoutAdapterDisplayNames } from './user-name'
+import { createAdapterDisplayNameResolver, withAdapterDisplayNames, withoutAdapterDisplayNames, type KoishiUserDatabase } from './user-name'
 
 export const name = 'smmcat-driftbottle'
 
@@ -64,7 +64,7 @@ export interface Config {
 
 export const inject = {
   required: ['localstorage'],
-  optional: ['assets', 'canvas'],
+  optional: ['assets', 'canvas', 'database'],
 }
 
 export const usage = `
@@ -658,8 +658,11 @@ export function apply(ctx: Context, config: Config) {
           return
         }
       }
-      if (!selectContent.review.length) {
-        await session.send(`Id为 ${id} 的瓶子下并没有任何留言。无需操作。`)
+      const visibleReviews = selectContent.review
+        .map((item, index) => ({ item, index }))
+        .filter(entry => !entry.item.isDel)
+      if (!visibleReviews.length) {
+        await session.send(`Id为 ${id} 的瓶子下并没有可删除的留言。无需操作。`)
         return
       }
       await session.send(
@@ -673,16 +676,15 @@ export function apply(ctx: Context, config: Config) {
         await session.send('操作超时，结束处理')
         return
       }
-      let delIndex = _delIndex.split(',').map((item) => {
-        if (isNaN(Number(item))) {
-          return null
-        }
-        const selectIndex = Math.floor(Number(item)) - 1
-        if (selectIndex < 0 || selectIndex >= selectContent.review.length) {
-          return null
-        }
-        return selectIndex
-      }).filter((item) => item !== null)
+      const delIndex = _delIndex.split(',').flatMap((item) => {
+        if (isNaN(Number(item))) return []
+        const displayIndex = Math.floor(Number(item)) - 1
+        if (displayIndex < 0 || displayIndex >= visibleReviews.length) return []
+        return [{
+          displayIndex,
+          reviewIndex: visibleReviews[displayIndex].index,
+        }]
+      })
 
       if (!delIndex.length) {
         await session.send(`未命中任意留言下标，主动操作结束。`)
@@ -691,20 +693,20 @@ export function apply(ctx: Context, config: Config) {
 
       const dict = []
 
-      delIndex.forEach((item) => {
-        if (selectContent.review[item].isDel) {
-          dict.push(`[×] 下标 ${item + 1} 留言已经是删除状态，无需操作！`)
+      delIndex.forEach(({ displayIndex, reviewIndex }) => {
+        if (selectContent.review[reviewIndex].isDel) {
+          dict.push(`[×] 下标 ${displayIndex + 1} 留言已经是删除状态，无需操作！`)
           return
         }
         // 为目标添加评论屏蔽日志
-        logs.addLogForEvent(selectContent.review[item].userId, {
+        logs.addLogForEvent(selectContent.review[reviewIndex].userId, {
           type: logType.PLFENGJIN,
           userId: session.userId,
           bottleId: selectContent.id,
           bottleType: this.driftbottleType(selectContent)
         })
-        dict.push(`[√] 成功删除下标 ${item + 1} 留言！`)
-        selectContent.review[item].isDel = true
+        dict.push(`[√] 成功删除下标 ${displayIndex + 1} 留言！`)
+        selectContent.review[reviewIndex].isDel = true
       })
 
       this.updateStoreUser(selectContent.userId)
@@ -930,6 +932,7 @@ export function apply(ctx: Context, config: Config) {
         config.uapisApiKey,
         ctx.http,
         Math.max(0, config.uapisCacheMinutes ?? 60) * 60_000,
+        (ctx as unknown as { database?: KoishiUserDatabase }).database,
       )
       await sendBottleBundle(
         session,
@@ -1023,6 +1026,7 @@ export function apply(ctx: Context, config: Config) {
         config.uapisApiKey,
         ctx.http,
         Math.max(0, config.uapisCacheMinutes ?? 60) * 60_000,
+        (ctx as unknown as { database?: KoishiUserDatabase }).database,
       )
       const displayHistory = await Promise.all(visibleHistory.map(async item => ({
         ...item,

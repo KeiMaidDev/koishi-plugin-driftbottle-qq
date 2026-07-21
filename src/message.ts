@@ -65,13 +65,55 @@ export interface BottleStatistics {
 }
 
 const MARKDOWN_SPECIALS = new Set(['\\', '`', '*', '{', '}', '[', ']', '(', ')', '#', '+', '-', '.', '!', '_', '>'])
+const HTTP_URL_PATTERN = /https?:\/\/[^\s<>"']+/giu
+const HTTP_URL_TRAILING_PUNCTUATION = new Set(['.', ',', '!', '?', ';', ':', '，', '。', '！', '？', '；', '：', '、'])
 export const QQ_MARKDOWN_IMAGE_MAX_WIDTH = 1024
 export const QQ_MARKDOWN_IMAGE_MAX_HEIGHT = 1024
+export const QQ_MARKDOWN_COMMENT_IMAGE_MAX_WIDTH = 600
+export const QQ_MARKDOWN_COMMENT_IMAGE_MAX_HEIGHT = 600
 
 export function escapeQQMarkdown(value: unknown): string {
   return Array.from(String(value ?? ''), character => {
     return MARKDOWN_SPECIALS.has(character) ? '\\' + character : character
   }).join('')
+}
+
+function splitHttpUrlTail(candidate: string): [string, string] {
+  let url = candidate
+  let suffix = ''
+  while (url && HTTP_URL_TRAILING_PUNCTUATION.has(url.at(-1)!)) {
+    suffix = url.at(-1) + suffix
+    url = url.slice(0, -1)
+  }
+
+  const pairs = [['(', ')'], ['[', ']']] as const
+  for (const [opening, closing] of pairs) {
+    let balance = Array.from(url).reduce((count, character) => {
+      if (character === opening) return count + 1
+      if (character === closing) return count - 1
+      return count
+    }, 0)
+    while (balance < 0 && url.endsWith(closing)) {
+      suffix = closing + suffix
+      url = url.slice(0, -1)
+      balance++
+    }
+  }
+  return [url, suffix]
+}
+
+export function escapeQQMarkdownWithLinks(value: unknown): string {
+  const text = String(value ?? '')
+  let result = ''
+  let offset = 0
+  for (const match of text.matchAll(HTTP_URL_PATTERN)) {
+    const index = match.index ?? 0
+    result += escapeQQMarkdown(text.slice(offset, index))
+    const [url, suffix] = splitHttpUrlTail(match[0])
+    result += url + suffix
+    offset = index + match[0].length
+  }
+  return result + escapeQQMarkdown(text.slice(offset))
 }
 
 function commandButton(label: string, data: string, enter: boolean, style = 1): QQKeyboardButton {
@@ -167,8 +209,10 @@ export async function resolveMarkdownImageDimensions(
   source: string,
   canvas?: CanvasImageLoader,
   fallbackSource?: string,
+  maxWidth = QQ_MARKDOWN_IMAGE_MAX_WIDTH,
+  maxHeight = QQ_MARKDOWN_IMAGE_MAX_HEIGHT,
 ): Promise<MarkdownImageDimensions> {
-  const fallback = { width: QQ_MARKDOWN_IMAGE_MAX_WIDTH, height: QQ_MARKDOWN_IMAGE_MAX_HEIGHT }
+  const fallback = { width: maxWidth, height: maxHeight }
   if (!canvas) return fallback
 
   const candidates = [...new Set([source, fallbackSource].filter((value): value is string => Boolean(value)))]
@@ -176,7 +220,7 @@ export async function resolveMarkdownImageDimensions(
     let image: CanvasImageResource | undefined
     try {
       image = await canvas.loadImage(candidate)
-      return fitMarkdownImageDimensions(image.naturalWidth, image.naturalHeight)
+      return fitMarkdownImageDimensions(image.naturalWidth, image.naturalHeight, maxWidth, maxHeight)
     } catch {
       // Try the Assets public URL when the original source cannot be loaded.
     } finally {
@@ -231,12 +275,14 @@ async function resolveQqMarkdownImages(
   canvas: CanvasImageLoader | undefined,
   failedMedia: ReturnType<typeof h>[],
   altPrefix: string,
+  maxWidth = QQ_MARKDOWN_IMAGE_MAX_WIDTH,
+  maxHeight = QQ_MARKDOWN_IMAGE_MAX_HEIGHT,
 ): Promise<string[]> {
   const markdownImages: string[] = []
   for (const [index, source] of sources.entries()) {
     const publicUrl = await resolveAssetImageUrl(source, assets)
     if (publicUrl) {
-      const dimensions = await resolveMarkdownImageDimensions(source, canvas, publicUrl)
+      const dimensions = await resolveMarkdownImageDimensions(source, canvas, publicUrl, maxWidth, maxHeight)
       markdownImages.push(buildMarkdownImage(
         publicUrl,
         altPrefix + ' ' + (index + 1),
@@ -250,10 +296,10 @@ async function resolveQqMarkdownImages(
   return markdownImages
 }
 
-function localReviewText(bottle: DiftInfo): string {
-  if (!bottle.review.length) return '暂无留言'
-  return bottle.review.map((item, index) => {
-    const content = item.isDel ? '管理员已删除该条评论' : item.text || '（无文字内容）'
+function localReviewText(reviews: DiftInfo['review']): string {
+  if (!reviews.length) return '暂无留言'
+  return reviews.map((item, index) => {
+    const content = item.text || '（无文字内容）'
     return String(index + 1) + '. ' + displayName(item.username, item.userId || '匿名') + '：' + content
   }).join('\n')
 }
@@ -265,7 +311,8 @@ export async function buildLocalBottleMessages(
   permissions: BottleActionPermissions = {},
   canvas?: CanvasImageLoader,
 ): Promise<BottleMessageBundle> {
-  const commentText = localReviewText(bottle)
+  const visibleReviews = bottle.review.filter(item => !item.isDel)
+  const commentText = localReviewText(visibleReviews)
   const fallbackText = [
     '【' + (bottle.content.title || '漂流瓶 #' + bottle.id) + '】',
     '编号：' + bottle.id,
@@ -286,8 +333,7 @@ export async function buildLocalBottleMessages(
 
   const fallback = h('message', {}, [h.text(fallbackText)])
   const sourceImages = (bottle.content.image || []).filter(Boolean)
-  const reviewSources = bottle.review
-    .filter(item => !item.isDel)
+  const reviewSources = visibleReviews
     .flatMap(item => (item.image || []).filter(Boolean))
   const fallbackMedia = [
     ...imageElements(sourceImages),
@@ -301,33 +347,33 @@ export async function buildLocalBottleMessages(
 
   const markdownImages = await resolveQqMarkdownImages(sourceImages, assets, canvas, media, '漂流瓶图片')
   const markdownReviews: string[] = []
-  if (!bottle.review.length) {
+  if (!visibleReviews.length) {
     markdownReviews.push('暂无留言')
   } else {
-    for (const [index, item] of bottle.review.entries()) {
-      const content = item.isDel ? '管理员已删除该条评论' : item.text || '（无文字内容）'
-      markdownReviews.push(escapeQQMarkdown(
+    for (const [index, item] of visibleReviews.entries()) {
+      const content = item.text || '（无文字内容）'
+      markdownReviews.push(escapeQQMarkdownWithLinks(
         String(index + 1) + '. ' + displayName(item.username, item.userId || '匿名') + '：' + content,
       ))
-      if (!item.isDel) {
-        const images = await resolveQqMarkdownImages(
-          (item.image || []).filter(Boolean),
-          assets,
-          canvas,
-          media,
-          '留言 ' + (index + 1) + ' 图片',
-        )
-        if (images.length) markdownReviews.push(...images)
-      }
-      if (index < bottle.review.length - 1) markdownReviews.push('')
+      const images = await resolveQqMarkdownImages(
+        (item.image || []).filter(Boolean),
+        assets,
+        canvas,
+        media,
+        '留言 ' + (index + 1) + ' 图片',
+        QQ_MARKDOWN_COMMENT_IMAGE_MAX_WIDTH,
+        QQ_MARKDOWN_COMMENT_IMAGE_MAX_HEIGHT,
+      )
+      if (images.length) markdownReviews.push(...images)
+      if (index < visibleReviews.length - 1) markdownReviews.push('')
     }
   }
   const markdown = [
-    '# ' + escapeQQMarkdown(bottle.content.title || '漂流瓶 #' + bottle.id),
+    '# ' + escapeQQMarkdownWithLinks(bottle.content.title || '漂流瓶 #' + bottle.id),
     '> 编号：' + bottle.id + ' ｜ 作者：' + escapeQQMarkdown(displayName(bottle.username, bottle.userId)),
     '> 被捞：' + bottle.getCount + ' 次 ｜ 创建时间：' + escapeQQMarkdown(formatTime(bottle.content.creatTime)),
     '',
-    escapeQQMarkdown(bottle.content.text || '（无文字内容）'),
+    escapeQQMarkdownWithLinks(bottle.content.text || '（无文字内容）'),
     ...(markdownImages.length ? ['', ...markdownImages] : []),
     '',
     '## 留言',
@@ -391,7 +437,7 @@ export async function buildCloudBottleMessages(
   } else {
     for (const [index, item] of bottle.review.entries()) {
       markdownComments.push(
-        String(index + 1) + '. ' + escapeQQMarkdown(item.userId) + '：' + escapeQQMarkdown(item.text || '（无文字内容）'),
+        String(index + 1) + '. ' + escapeQQMarkdown(item.userId) + '：' + escapeQQMarkdownWithLinks(item.text || '（无文字内容）'),
       )
       const images = await resolveQqMarkdownImages(
         (item.image || []).filter(Boolean),
@@ -399,6 +445,8 @@ export async function buildCloudBottleMessages(
         canvas,
         media,
         '留言 ' + (index + 1) + ' 图片',
+        QQ_MARKDOWN_COMMENT_IMAGE_MAX_WIDTH,
+        QQ_MARKDOWN_COMMENT_IMAGE_MAX_HEIGHT,
       )
       if (images.length) markdownComments.push(...images)
       if (index < bottle.review.length - 1) markdownComments.push('')
@@ -406,12 +454,12 @@ export async function buildCloudBottleMessages(
   }
 
   const markdown = [
-    '# ' + escapeQQMarkdown(bottle.content.title || '云漂流瓶 #' + bottle.id),
+    '# ' + escapeQQMarkdownWithLinks(bottle.content.title || '云漂流瓶 #' + bottle.id),
     '> 编号：' + escapeQQMarkdown(bottle.id) + ' ｜ 作者：' + escapeQQMarkdown(bottle.content.userId),
     '> 来源：' + escapeQQMarkdown(bottle.platform) + ' ｜ 被捞：' + bottle.getCount + ' 次',
     '> 创建时间：' + escapeQQMarkdown(formatTime(bottle.content.createTime)),
     '',
-    escapeQQMarkdown(bottle.content.text || '（无文字内容）'),
+    escapeQQMarkdownWithLinks(bottle.content.text || '（无文字内容）'),
     ...(contentImages.length ? ['', ...contentImages] : []),
     '',
     '## 留言',
@@ -756,10 +804,10 @@ export function buildHistoryBundle(
 }
 
 export function buildCommentSelectionText(bottle: DiftInfo, markdown: boolean): string {
-  const lines = bottle.review.map((item, index) => {
-    const content = item.isDel ? '管理员已删除该条评论' : item.text || '（无文字内容）'
+  const lines = bottle.review.filter(item => !item.isDel).map((item, index) => {
+    const content = item.text || '（无文字内容）'
     const raw = displayName(item.username, item.userId || '匿名') + '：' + content
-    return String(index + 1) + '. ' + (markdown ? escapeQQMarkdown(raw) : raw)
+    return String(index + 1) + '. ' + (markdown ? escapeQQMarkdownWithLinks(raw) : raw)
   })
   return [
     '漂流瓶 #' + bottle.id + ' 的留言',
