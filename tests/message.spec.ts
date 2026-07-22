@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { h } from 'koishi'
+import { h, Universal } from 'koishi'
 import type { DiftInfo } from '../src'
 import {
   buildCloudBottleMessages,
@@ -11,14 +11,20 @@ import {
   buildReportAdminBundle,
   buildMainMenuBundle,
   buildStatisticsBundle,
+  buildThrowBottlePrompt,
+  buildThrowBottleResultMessage,
   buildMarkdownImage,
   createBottleKeyboard,
   createMainKeyboard,
   escapeQQMarkdownWithLinks,
   fitMarkdownImageDimensions,
   resolveMarkdownImageDimensions,
+  THROW_BOTTLE_CANCEL_VALUE,
+  THROW_BOTTLE_SKIP_IMAGE_VALUE,
+  THROW_BOTTLE_SKIP_TITLE_VALUE,
 } from '../src/message'
 import { BottleReportRegistry } from '../src/report'
+import { sendProactivePrivateMessage } from '../src/proactive-message'
 import { createAdapterDisplayNameResolver, fetchQqNicknameFromUapis, isNumericQqUserId, pickAdapterDisplayName, withAdapterDisplayNames, withoutAdapterDisplayNames } from '../src/user-name'
 
 test('QQ markdown image preserves supplied dimensions and oversized images keep their aspect ratio', () => {
@@ -352,6 +358,45 @@ test('admin report notice provides QQ review and local ban buttons', () => {
   assert.equal(buildReportAdminBundle({
     scope: 'cloud', bottleId: '77', reportCount: 3, threshold: 3, reporterId: 'reporter',
   }, 'onebot').primary.type, 'message')
+})
+
+test('proactive private message preserves adapter direct-channel metadata', async () => {
+  const content = h('qq:rawmarkdown', { markdown: { content: '审核通知' } })
+  const calls: Array<{ name: string, args: any[] }> = []
+  const directChannel = { id: 'private:admin-openid', type: Universal.Channel.Type.DIRECT }
+  const directSession = {
+    event: { channel: directChannel, user: { id: 'admin-openid' } },
+    isDirect: true,
+  }
+  const bot = {
+    async createDirectChannel(userId: string) {
+      calls.push({ name: 'createDirectChannel', args: [userId] })
+      return directChannel
+    },
+    session(event: unknown) {
+      calls.push({ name: 'session', args: [event] })
+      return directSession
+    },
+    async sendMessage(...args: any[]) {
+      calls.push({ name: 'sendMessage', args })
+      return ['message-id']
+    },
+  }
+
+  const result = await sendProactivePrivateMessage(bot as any, 'admin-openid', content)
+
+  assert.deepEqual(result, ['message-id'])
+  assert.deepEqual(calls[0], { name: 'createDirectChannel', args: ['admin-openid'] })
+  assert.deepEqual(calls[1], {
+    name: 'session',
+    args: [{ channel: directChannel, user: { id: 'admin-openid' } }],
+  })
+  assert.equal(calls[2].name, 'sendMessage')
+  assert.equal(calls[2].args[0], 'private:admin-openid')
+  assert.equal(calls[2].args[1], content)
+  assert.equal(calls[2].args[2], null)
+  assert.equal(calls[2].args[3].session, directSession)
+  assert.equal(calls[2].args[3].session.isDirect, true)
 })
 
 test('report registry deduplicates users and retries a failed threshold notification', async () => {
@@ -724,6 +769,40 @@ test('log query uses card-style QQ markdown and navigation keyboard', () => {
   assert.equal(bundle.primary.attrs.keyboard.content.rows[0].buttons[0].action.data, '查看瓶子记录')
   assert.equal(bundle.primary.attrs.keyboard.content.rows[1].buttons[1].action.data, '漂流瓶')
   assert.equal(buildLogBundle([], 'discord').primary.type, 'message')
+})
+
+test('throw bottle prompts use QQ markdown keyboards and provide fallback text', () => {
+  const contentPrompt = buildThrowBottlePrompt('content', 'qq')
+  assert.equal(contentPrompt.type, 'qq:rawmarkdown')
+  assert.equal(contentPrompt.attrs.markdown.content.includes('# 填写漂流瓶内容'), true)
+  assert.equal(contentPrompt.attrs.keyboard.content.rows[0].buttons[0].action.data, THROW_BOTTLE_CANCEL_VALUE)
+
+  const imagePrompt = buildThrowBottlePrompt('image', 'qq')
+  assert.deepEqual(
+    imagePrompt.attrs.keyboard.content.rows[0].buttons.map(button => button.render_data.label),
+    ['跳过配图', '取消扔瓶'],
+  )
+  assert.equal(imagePrompt.attrs.keyboard.content.rows[0].buttons[0].action.data, THROW_BOTTLE_SKIP_IMAGE_VALUE)
+  assert.equal(imagePrompt.attrs.keyboard.content.rows[0].buttons[1].action.data, THROW_BOTTLE_CANCEL_VALUE)
+
+  const titlePrompt = buildThrowBottlePrompt('title', 'qq')
+  assert.deepEqual(
+    titlePrompt.attrs.keyboard.content.rows[0].buttons.map(button => button.render_data.label),
+    ['跳过标题', '取消扔瓶'],
+  )
+  assert.equal(titlePrompt.attrs.keyboard.content.rows[0].buttons[0].action.data, THROW_BOTTLE_SKIP_TITLE_VALUE)
+
+  const result = buildThrowBottleResultMessage('成功扔出 #12 漂流瓶。', 'qq', true)
+  assert.equal(result.type, 'qq:rawmarkdown')
+  assert.equal(result.attrs.markdown.content.includes('# 漂流瓶已投入大海'), true)
+  assert.deepEqual(
+    result.attrs.keyboard.content.rows.flatMap(row => row.buttons).map(button => button.render_data.label),
+    ['再扔一个', '捞一个', '返回菜单'],
+  )
+  assert.equal(result.attrs.keyboard.content.rows[0].buttons[0].action.data, '扔漂流瓶 ')
+  assert.equal(result.attrs.keyboard.content.rows[0].buttons[0].action.enter, false)
+  assert.equal(buildThrowBottlePrompt('content', 'onebot').type, 'text')
+  assert.equal(buildThrowBottleResultMessage('操作结束', 'onebot', false).type, 'text')
 })
 
 test('main command shows sea statistics with a dedicated statistics button', () => {

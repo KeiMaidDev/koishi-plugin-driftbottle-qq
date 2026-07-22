@@ -15,13 +15,19 @@ import {
   buildMainMenuBundle,
   buildReportAdminBundle,
   buildStatisticsBundle,
+  buildThrowBottlePrompt,
+  buildThrowBottleResultMessage,
   sendBottleBundle,
+  THROW_BOTTLE_CANCEL_VALUE,
+  THROW_BOTTLE_SKIP_IMAGE_VALUE,
+  THROW_BOTTLE_SKIP_TITLE_VALUE,
   type AssetTransformer,
   type CanvasImageLoader,
   type BottleStatistics,
   type LogDisplayItem,
 } from './message'
 import { BottleReportRegistry, type ReportScope } from './report'
+import { sendProactivePrivateMessage } from './proactive-message'
 import { createAdapterDisplayNameResolver, withAdapterDisplayNames, withoutAdapterDisplayNames, type KoishiUserDatabase } from './user-name'
 
 export const name = 'smmcat-driftbottle'
@@ -75,7 +81,7 @@ export const usage = `
 `
 
 export const Config: Schema<Config> = Schema.object({
-  adminQQ: Schema.array(String).role('table').description('管理员QQ 可查指定id内容，删除瓶子'),
+  adminQQ: Schema.array(String).role('table').description('管理员用户 ID；QQ 平台请填写 adapter-qq-crack 提供的用户 OpenID（session.userId），可用于审核、删除及接收举报主动私信'),
   uapisApiKey: Schema.string().role('secret').default('').description('可选的 Uapis API Key，填写后使用 Bearer 鉴权查询纯数字 QQ ID 昵称'),
   uapisCacheMinutes: Schema.number().min(0).step(1).default(60).description('Uapis QQ 昵称缓存时长（分钟），设为 0 可禁用缓存'),
   autoCorrectionPath: Schema.boolean().default(true).description('自动矫正多媒体文件存放位置'),
@@ -1251,11 +1257,11 @@ export function apply(ctx: Context, config: Config) {
       let delivered = 0
       for (const adminId of admins) {
         try {
-          await session.bot.sendPrivateMessage(adminId, bundle.primary)
+          await sendProactivePrivateMessage(session.bot, adminId, bundle.primary)
           delivered++
         } catch (primaryError) {
           try {
-            await session.bot.sendPrivateMessage(adminId, bundle.fallback)
+            await sendProactivePrivateMessage(session.bot, adminId, bundle.fallback)
             delivered++
           } catch (fallbackError) {
             ctx.logger(name).warn(
@@ -1396,35 +1402,66 @@ export function apply(ctx: Context, config: Config) {
       let res = msgContent || ''
 
       if (!res.trim()) {
-        await session.send('(*/ω＼*) 您正在尝试丢出一个瓶子，请在60秒内发送你瓶子里的内容。')
-        res = await session.prompt(60000)
-      }
-      if (res && res.trim()) {
-        // 判断是否需要添加图片内容
-        if (h.select(res, 'aduio').length == 0 && h.select(res, 'img').length == 0) {
-          await session.send('(￣y▽￣)╭ 似乎没有携带图片，这对其他用户可能阅读上有些单调；需要为漂流瓶配图吗？请在20秒内发送图片作为补充内容\n不需要则发：否')
-          let imgTemp = await session.prompt(20000)
-          let imgList = imgTemp ? h.select(imgTemp, 'img').map((item) => h.image(item.attrs.src)) : null
-          // 添加图片
-          if (imgList?.length) {
-            res += imgList
-          } else {
-            if (imgTemp !== undefined && imgTemp.trim() !== "否") {
-              await session.send('(；′⌒`) 啊...没检测到图片，图片上传失败')
-            }
-          }
-        }
-        await session.send('(´▽`ʃ♡ƪ) 是否要为该瓶子起一个标题？请在20秒内发送，不需要则发：否')
-        let title = await session.prompt(20000)
-        if (title && title.trim() !== '否') {
-          title = h.select(title, 'text')[0]?.attrs.content
-          const result = await driftbottle.getContentMakeRecords(session, res, title);
-          await session.send(result.msg)
+        await session.send(buildThrowBottlePrompt('content', session.platform))
+        const contentInput = await session.prompt(60000)
+        if (contentInput === undefined) {
+          await session.send(buildThrowBottleResultMessage(
+            '等待瓶子内容超时，本次操作已取消。',
+            session.platform,
+            false,
+          ))
           return
         }
-        const result = await driftbottle.getContentMakeRecords(session, res);
-        await session.send(result.msg)
+        if (contentInput.trim() === THROW_BOTTLE_CANCEL_VALUE) {
+          await session.send(buildThrowBottleResultMessage('已取消本次扔漂流瓶操作。', session.platform, false))
+          return
+        }
+        res = contentInput
       }
+      if (!res?.trim()) {
+        await session.send(buildThrowBottleResultMessage('未收到有效的瓶子内容，本次操作已取消。', session.platform, false))
+        return
+      }
+
+      // 判断是否需要添加图片内容
+      if (h.select(res, 'aduio').length == 0 && h.select(res, 'img').length == 0) {
+        await session.send(buildThrowBottlePrompt('image', session.platform))
+        const imgTemp = await session.prompt(20000)
+        const imageInput = imgTemp?.trim()
+        if (imageInput === THROW_BOTTLE_CANCEL_VALUE) {
+          await session.send(buildThrowBottleResultMessage('已取消本次扔漂流瓶操作。', session.platform, false))
+          return
+        }
+        const skipImage = imageInput === THROW_BOTTLE_SKIP_IMAGE_VALUE || imageInput === '否'
+        const imgList = !skipImage && imgTemp
+          ? h.select(imgTemp, 'img').map((item) => h.image(item.attrs.src))
+          : null
+        if (imgList?.length) {
+          res += imgList
+        } else if (imgTemp !== undefined && !skipImage) {
+          await session.send(buildAuxiliaryMessage(
+            '## 配图未添加\n> 没有检测到有效图片，将继续创建无配图漂流瓶。',
+            session.platform,
+          ))
+        }
+      }
+
+      await session.send(buildThrowBottlePrompt('title', session.platform))
+      let title = await session.prompt(20000)
+      const titleInput = title?.trim()
+      if (titleInput === THROW_BOTTLE_CANCEL_VALUE) {
+        await session.send(buildThrowBottleResultMessage('已取消本次扔漂流瓶操作。', session.platform, false))
+        return
+      }
+      const skipTitle = titleInput === THROW_BOTTLE_SKIP_TITLE_VALUE || titleInput === '否'
+      if (title && !skipTitle) {
+        title = h.select(title, 'text')[0]?.attrs.content
+        const result = await driftbottle.getContentMakeRecords(session, res, title)
+        await session.send(buildThrowBottleResultMessage(result.msg, session.platform, result.code))
+        return
+      }
+      const result = await driftbottle.getContentMakeRecords(session, res)
+      await session.send(buildThrowBottleResultMessage(result.msg, session.platform, result.code))
     })
 
   ctx

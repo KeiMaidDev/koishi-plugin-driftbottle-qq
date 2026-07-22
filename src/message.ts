@@ -594,6 +594,93 @@ export function buildAuxiliaryMessage(content: string, platform: string): Return
   return h.text(content)
 }
 
+export type ThrowBottlePromptStage = 'content' | 'image' | 'title'
+
+export const THROW_BOTTLE_CANCEL_VALUE = '取消扔漂流瓶'
+export const THROW_BOTTLE_SKIP_IMAGE_VALUE = '跳过配图'
+export const THROW_BOTTLE_SKIP_TITLE_VALUE = '跳过标题'
+
+function createThrowBottlePromptKeyboard(stage: ThrowBottlePromptStage): QQKeyboard {
+  const buttons: QQKeyboardButton[] = []
+  if (stage === 'image') {
+    buttons.push(commandButton('跳过配图', THROW_BOTTLE_SKIP_IMAGE_VALUE, true, 0))
+  } else if (stage === 'title') {
+    buttons.push(commandButton('跳过标题', THROW_BOTTLE_SKIP_TITLE_VALUE, true, 0))
+  }
+  buttons.push(commandButton('取消扔瓶', THROW_BOTTLE_CANCEL_VALUE, true, 0))
+  return { content: { rows: [{ buttons }] } }
+}
+
+export function buildThrowBottlePrompt(
+  stage: ThrowBottlePromptStage,
+  platform: string,
+): ReturnType<typeof h> {
+  const prompt = stage === 'content'
+    ? {
+        title: '填写漂流瓶内容',
+        description: '请在 60 秒内发送文字、图片或音频作为瓶子内容。',
+        hint: '也可以点击下方按钮取消本次操作。',
+      }
+    : stage === 'image'
+      ? {
+          title: '是否添加配图',
+          description: '当前内容没有图片，请在 20 秒内发送图片作为补充。',
+          hint: '不需要图片时，可以点击“跳过配图”。',
+        }
+      : {
+          title: '是否添加标题',
+          description: '请在 20 秒内发送漂流瓶标题。',
+          hint: '不需要标题时，可以点击“跳过标题”。',
+        }
+  const fallbackText = [prompt.title, prompt.description, prompt.hint].join('\n')
+  if (platform !== 'qq') return h.text(fallbackText)
+  return h('qq:rawmarkdown', {
+    markdown: {
+      content: [
+        '# ' + prompt.title,
+        '> ' + prompt.description,
+        '',
+        prompt.hint,
+      ].join('\n'),
+    },
+    keyboard: createThrowBottlePromptKeyboard(stage),
+  })
+}
+
+function createThrowBottleResultKeyboard(): QQKeyboard {
+  return {
+    content: {
+      rows: [
+        {
+          buttons: [
+            commandButton('再扔一个', '扔漂流瓶 ', false),
+            commandButton('捞一个', '捞漂流瓶', true),
+          ],
+        },
+        { buttons: [commandButton('返回菜单', '漂流瓶', true, 0)] },
+      ],
+    },
+  }
+}
+
+export function buildThrowBottleResultMessage(
+  content: string,
+  platform: string,
+  success: boolean,
+): ReturnType<typeof h> {
+  if (platform !== 'qq') return h.text(content)
+  return h('qq:rawmarkdown', {
+    markdown: {
+      content: [
+        '# ' + (success ? '漂流瓶已投入大海' : '扔漂流瓶操作结束'),
+        '',
+        escapeQQMarkdownWithLinks(content),
+      ].join('\n'),
+    },
+    keyboard: createThrowBottleResultKeyboard(),
+  })
+}
+
 function historyTypeIcon(type: HistoryInfoList['type']) {
   if (type === '语音瓶') return '🎧'
   if (type === '图片瓶') return '🖼️'
