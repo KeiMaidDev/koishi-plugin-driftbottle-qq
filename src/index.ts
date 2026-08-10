@@ -22,7 +22,7 @@ import {
   THROW_BOTTLE_SKIP_IMAGE_VALUE,
   THROW_BOTTLE_SKIP_TITLE_VALUE,
   type AssetTransformer,
-  type CanvasImageLoader,
+  type ImageDataLoader,
   type BottleStatistics,
   type LogDisplayItem,
 } from './message'
@@ -71,7 +71,7 @@ export interface Config {
 
 export const inject = {
   required: ['localstorage'],
-  optional: ['assets', 'canvas', 'database'],
+  optional: ['assets', 'database'],
 }
 
 export const usage = `
@@ -954,7 +954,7 @@ export function apply(ctx: Context, config: Config) {
               || (config.allowDelOfAuthor && bottle.userId === session.userId),
             ),
           },
-          (ctx as Context & { canvas?: CanvasImageLoader }).canvas,
+          ctx.http as ImageDataLoader,
         ),
       )
     },
@@ -1550,7 +1550,7 @@ export function apply(ctx: Context, config: Config) {
             data,
             session.platform,
             (ctx as Context & { assets?: AssetTransformer }).assets,
-            (ctx as Context & { canvas?: CanvasImageLoader }).canvas,
+            ctx.http as ImageDataLoader,
           ),
         )
         return

@@ -1,4 +1,5 @@
 import { h, type Session } from 'koishi'
+import { imageSize } from 'image-size'
 import type { DiftInfo, HistoryInfoList } from '.'
 import type { WebBottleData } from './webBottle'
 import type { ReportScope } from './report'
@@ -33,14 +34,8 @@ export interface AssetTransformer {
   transform(content: string): Promise<string>
 }
 
-export interface CanvasImageResource {
-  readonly naturalWidth: number
-  readonly naturalHeight: number
-  dispose(): Promise<void>
-}
-
-export interface CanvasImageLoader {
-  loadImage(source: string): Promise<CanvasImageResource>
+export interface ImageDataLoader {
+  get(source: string, config: { responseType: 'arraybuffer' }): Promise<ArrayBuffer | Uint8Array>
 }
 
 export interface MarkdownImageDimensions {
@@ -114,6 +109,13 @@ export function escapeQQMarkdownWithLinks(value: unknown): string {
     offset = index + match[0].length
   }
   return result + escapeQQMarkdown(text.slice(offset))
+}
+
+export function buildMarkdownCodeBlock(value: unknown): string {
+  const content = String(value ?? '')
+  const longestBacktickRun = Math.max(0, ...Array.from(content.matchAll(/`+/gu), match => match[0].length))
+  const fence = '`'.repeat(Math.max(3, longestBacktickRun + 1))
+  return fence + '\n' + content + '\n' + fence
 }
 
 function commandButton(label: string, data: string, enter: boolean, style = 1): QQKeyboardButton {
@@ -208,30 +210,24 @@ export function fitMarkdownImageDimensions(
 
 export async function resolveMarkdownImageDimensions(
   source: string,
-  canvas?: CanvasImageLoader,
+  imageLoader?: ImageDataLoader,
   fallbackSource?: string,
   maxWidth = QQ_MARKDOWN_IMAGE_MAX_WIDTH,
   maxHeight = QQ_MARKDOWN_IMAGE_MAX_HEIGHT,
 ): Promise<MarkdownImageDimensions> {
   const fallback = { width: maxWidth, height: maxHeight }
-  if (!canvas) return fallback
+  if (!imageLoader) return fallback
 
   const candidates = [...new Set([source, fallbackSource].filter((value): value is string => Boolean(value)))]
   for (const candidate of candidates) {
-    let image: CanvasImageResource | undefined
     try {
-      image = await canvas.loadImage(candidate)
-      return fitMarkdownImageDimensions(image.naturalWidth, image.naturalHeight, maxWidth, maxHeight)
+      const data = await imageLoader.get(candidate, { responseType: 'arraybuffer' })
+      const bytes = data instanceof Uint8Array ? data : new Uint8Array(data)
+      const dimensions = imageSize(bytes)
+      if (!dimensions.width || !dimensions.height) continue
+      return fitMarkdownImageDimensions(dimensions.width, dimensions.height, maxWidth, maxHeight)
     } catch {
       // Try the Assets public URL when the original source cannot be loaded.
-    } finally {
-      if (image) {
-        try {
-          await image.dispose()
-        } catch {
-          // Dimension lookup succeeded; disposal failure must not block the bottle message.
-        }
-      }
     }
   }
   return fallback
@@ -273,7 +269,7 @@ function audioElements(sources: readonly string[] | null | undefined): ReturnTyp
 async function resolveQqMarkdownImages(
   sources: readonly string[],
   assets: AssetTransformer | undefined,
-  canvas: CanvasImageLoader | undefined,
+  imageLoader: ImageDataLoader | undefined,
   failedMedia: ReturnType<typeof h>[],
   altPrefix: string,
   maxWidth = QQ_MARKDOWN_IMAGE_MAX_WIDTH,
@@ -283,7 +279,7 @@ async function resolveQqMarkdownImages(
   for (const [index, source] of sources.entries()) {
     const publicUrl = await resolveAssetImageUrl(source, assets)
     if (publicUrl) {
-      const dimensions = await resolveMarkdownImageDimensions(source, canvas, publicUrl, maxWidth, maxHeight)
+      const dimensions = await resolveMarkdownImageDimensions(source, imageLoader, publicUrl, maxWidth, maxHeight)
       markdownImages.push(buildMarkdownImage(
         publicUrl,
         altPrefix + ' ' + (index + 1),
@@ -310,7 +306,7 @@ export async function buildLocalBottleMessages(
   platform: string,
   assets?: AssetTransformer,
   permissions: BottleActionPermissions = {},
-  canvas?: CanvasImageLoader,
+  imageLoader?: ImageDataLoader,
 ): Promise<BottleMessageBundle> {
   const visibleReviews = bottle.review.filter(item => !item.isDel)
   const commentText = localReviewText(visibleReviews)
@@ -346,7 +342,7 @@ export async function buildLocalBottleMessages(
     return { primary: fallback, media: fallbackMedia, fallback, fallbackMedia }
   }
 
-  const markdownImages = await resolveQqMarkdownImages(sourceImages, assets, canvas, media, '漂流瓶图片')
+  const markdownImages = await resolveQqMarkdownImages(sourceImages, assets, imageLoader, media, '漂流瓶图片')
   const markdownReviews: string[] = []
   if (!visibleReviews.length) {
     markdownReviews.push('暂无留言')
@@ -359,7 +355,7 @@ export async function buildLocalBottleMessages(
       const images = await resolveQqMarkdownImages(
         (item.image || []).filter(Boolean),
         assets,
-        canvas,
+        imageLoader,
         media,
         '留言 ' + (index + 1) + ' 图片',
         QQ_MARKDOWN_COMMENT_IMAGE_MAX_WIDTH,
@@ -374,7 +370,7 @@ export async function buildLocalBottleMessages(
     '> 编号：' + bottle.id + ' ｜ 作者：' + escapeQQMarkdown(displayName(bottle.username, bottle.userId)),
     '> 被捞：' + bottle.getCount + ' 次 ｜ 创建时间：' + escapeQQMarkdown(formatTime(bottle.content.creatTime)),
     '',
-    escapeQQMarkdownWithLinks(bottle.content.text || '（无文字内容）'),
+    buildMarkdownCodeBlock(bottle.content.text || '（无文字内容）'),
     ...(markdownImages.length ? ['', ...markdownImages] : []),
     '',
     '## 留言',
@@ -396,7 +392,7 @@ export async function buildCloudBottleMessages(
   bottle: WebBottleData,
   platform: string,
   assets?: AssetTransformer,
-  canvas?: CanvasImageLoader,
+  imageLoader?: ImageDataLoader,
 ): Promise<BottleMessageBundle> {
   const fallbackComments = bottle.review.length
     ? bottle.review.map((item, index) =>
@@ -431,7 +427,7 @@ export async function buildCloudBottleMessages(
     return { primary: fallback, media: fallbackMedia, fallback, fallbackMedia }
   }
 
-  const contentImages = await resolveQqMarkdownImages(contentSources, assets, canvas, media, '云漂流瓶图片')
+  const contentImages = await resolveQqMarkdownImages(contentSources, assets, imageLoader, media, '云漂流瓶图片')
   const markdownComments: string[] = []
   if (!bottle.review.length) {
     markdownComments.push('暂无留言')
@@ -443,7 +439,7 @@ export async function buildCloudBottleMessages(
       const images = await resolveQqMarkdownImages(
         (item.image || []).filter(Boolean),
         assets,
-        canvas,
+        imageLoader,
         media,
         '留言 ' + (index + 1) + ' 图片',
         QQ_MARKDOWN_COMMENT_IMAGE_MAX_WIDTH,
@@ -460,7 +456,7 @@ export async function buildCloudBottleMessages(
     '> 来源：' + escapeQQMarkdown(bottle.platform) + ' ｜ 被捞：' + bottle.getCount + ' 次',
     '> 创建时间：' + escapeQQMarkdown(formatTime(bottle.content.createTime)),
     '',
-    escapeQQMarkdownWithLinks(bottle.content.text || '（无文字内容）'),
+    buildMarkdownCodeBlock(bottle.content.text || '（无文字内容）'),
     ...(contentImages.length ? ['', ...contentImages] : []),
     '',
     '## 留言',
