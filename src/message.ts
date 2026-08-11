@@ -113,9 +113,7 @@ export function escapeQQMarkdownWithLinks(value: unknown): string {
 
 export function buildMarkdownCodeBlock(value: unknown): string {
   const content = String(value ?? '')
-  const longestBacktickRun = Math.max(0, ...Array.from(content.matchAll(/`+/gu), match => match[0].length))
-  const fence = '`'.repeat(Math.max(3, longestBacktickRun + 1))
-  return fence + '\n' + content + '\n' + fence
+  return '```\n' + content + '\n```'
 }
 
 function commandButton(label: string, data: string, enter: boolean, style = 1): QQKeyboardButton {
