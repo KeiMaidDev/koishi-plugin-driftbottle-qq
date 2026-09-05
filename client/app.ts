@@ -456,7 +456,9 @@ export default defineComponent({
 
     return () => {
       const st = stats.value
-      return h(el('k-layout'), () => h('div', { style: 'padding:16px;display:flex;flex-direction:column;gap:12px;height:100%;box-sizing:border-box' }, [
+      // k-layout 的 .layout-main 固定 overflow:hidden，页面必须自备滚动容器，
+      // 否则单页 20 行满页时表格溢出部分会被直接裁掉（无法滚动）
+      return h(el('k-layout'), () => h('div', { style: 'padding:16px;display:flex;flex-direction:column;gap:12px;height:100%;box-sizing:border-box;overflow-y:auto' }, [
         // 顶部统计条（两个 Tab 共享；待审投稿可点击跳转）
         h('div', {
           style: 'display:flex;gap:24px;align-items:center;flex-wrap:wrap;background:#fff;border:1px solid #ebeef5;border-radius:6px;padding:12px 20px',
@@ -478,7 +480,7 @@ export default defineComponent({
             '待审投稿' + (st?.pendingSubmissions ? '（' + st.pendingSubmissions + '）' : '')),
         ]),
         activeTab.value === 'bottles'
-          ? h('div', { style: 'display:flex;flex-direction:column;gap:12px;flex:1;min-height:0' }, [
+          ? h('div', { style: 'display:flex;flex-direction:column;gap:12px;flex:1' }, [
               // 筛选与搜索
               h('div', { style: 'display:flex;gap:12px;align-items:center;flex-wrap:wrap' }, [
                 h(el('el-radio-group'), {
@@ -503,16 +505,16 @@ export default defineComponent({
                 h(el('el-button'), { size: 'small', type: 'primary', plain: true, onClick: applySearch }, () => '搜索'),
               ]),
               // 列表 + 详情两栏（窄屏自动纵向堆叠）
-              h('div', { style: 'display:flex;gap:12px;align-items:flex-start;flex:1;min-height:0;flex-wrap:wrap' }, [
+              h('div', { style: 'display:flex;gap:12px;align-items:flex-start;flex:1;flex-wrap:wrap' }, [
                 renderListPane(),
                 renderDetailPane(),
               ]),
             ])
-          : h('div', { style: 'display:flex;flex-direction:column;gap:12px;flex:1;min-height:0' }, [
+          : h('div', { style: 'display:flex;flex-direction:column;gap:12px;flex:1' }, [
               h('div', { style: 'font-size:12px;color:#909399' },
                 '自动内容安全审核不可用时，用户投稿需在此通过预审后才会入海。'),
               // 待审列表 + 待审详情两栏（与瓶子管理结构对称）
-              h('div', { style: 'display:flex;gap:12px;align-items:flex-start;flex:1;min-height:0;flex-wrap:wrap' }, [
+              h('div', { style: 'display:flex;gap:12px;align-items:flex-start;flex:1;flex-wrap:wrap' }, [
                 renderPendingListPane(),
                 renderPendingDetailPane(),
               ]),
