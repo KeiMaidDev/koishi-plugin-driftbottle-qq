@@ -41,6 +41,24 @@ declare module '@koishijs/console' {
 /** 面板事件名前缀，客户端通过同名事件请求与监听广播 */
 export const CONSOLE_API_PREFIX = 'driftbottle-console'
 
+/** 包名（与 package.json name 一致），用于定位 workspace 安装时的 node_modules 链接 */
+const PKG_NAME = 'koishi-plugin-driftbottle-qq'
+
+/**
+ * 计算控制台客户端 entry 路径。
+ * 生产模式下 @koishijs/plugin-console 的静态服务只放行 console 自身 dist 与
+ * 路径含 node_modules 的文件；而本插件经 workspace symlink 被 Node realpath
+ * 解析到 external/ 下，__dirname 形式的 prod 路径会被 403（面板无法显示）。
+ * 因此 prod 优先走 node_modules 链接路径，真实安装进 node_modules 时回退 __dirname。
+ */
+export function resolveConsoleEntry(ctx: Pick<Context, 'baseDir'>): { dev: string; prod: string } {
+  const viaNodeModules = path.resolve(ctx.baseDir, 'node_modules', PKG_NAME, 'dist')
+  return {
+    dev: path.resolve(ctx.baseDir, 'client/index.ts'),
+    prod: fs.existsSync(viaNodeModules) ? viaNodeModules : path.resolve(__dirname, '../dist'),
+  }
+}
+
 export interface ConsoleGlue {
   driftbottle: {
     GetAllBottle(): DiftInfo[]
@@ -212,9 +230,6 @@ export const setupConsole = Object.assign(
     koaCtx.body = fs.createReadStream(file)
   })
 
-  ctx.console.addEntry({
-    dev: path.resolve(ctx.baseDir, 'client/index.ts'),
-    prod: path.resolve(__dirname, '../dist'),
-  })
+  ctx.console.addEntry(resolveConsoleEntry(ctx))
 // server：媒体路由挂在 server 服务上；console 的 required inject 已保证 console 可用时 server 必已启动
 }, { inject: { console: { required: false }, server: { required: false } } })
