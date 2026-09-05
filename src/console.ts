@@ -216,4 +216,5 @@ export const setupConsole = Object.assign(
     dev: path.resolve(ctx.baseDir, 'client/index.ts'),
     prod: path.resolve(__dirname, '../dist'),
   })
-}, { inject: { console: { required: false } } })
+// server：媒体路由挂在 server 服务上；console 的 required inject 已保证 console 可用时 server 必已启动
+}, { inject: { console: { required: false }, server: { required: false } } })
