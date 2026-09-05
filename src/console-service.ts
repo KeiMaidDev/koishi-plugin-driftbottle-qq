@@ -1,5 +1,6 @@
 import type { DiftInfo } from './index'
 import { isReportPending, type BottleReportRegistry } from './report'
+import type { PendingSubmissionRecord } from './pre-review'
 
 /** 控制台列表筛选标签 */
 export type ConsoleFilter = 'all' | 'reported' | 'banned'
@@ -15,7 +16,9 @@ export function isConsoleOperator(userId: string): boolean {
 }
 
 /** 面板数据变更动作，QQ 端与控制台端共用 */
-export type PanelChangeAction = 'ban' | 'unban' | 'delete-review' | 'dismiss-report' | 'report'
+export type PanelChangeAction =
+  | 'ban' | 'unban' | 'delete-review' | 'dismiss-report' | 'report'
+  | 'submit-submission' | 'approve-submission' | 'reject-submission' | 'withdraw-submission'
 
 export interface ConsoleLogInfo {
   type: number
@@ -45,6 +48,14 @@ export interface ConsoleServiceDeps {
   mediaResolver(url: string | null | undefined, kind: 'image' | 'audio'): string | null
   /** 数据变更后广播（刷新所有已打开的面板） */
   notifyChange(action: PanelChangeAction): void
+  /** 当前所有待审投稿（内存全量） */
+  getPendingSubmissions(): PendingSubmissionRecord[]
+  /** 待审投稿的类型判断 */
+  pendingType(pending: PendingSubmissionRecord): string
+  /** 通过预审：转正为瓶子（分配 ID、入海、写发布日志），由 glue 实现具体转正 */
+  approvePending(pendingId: number, operator: string): Promise<ConsoleOpResult>
+  /** 驳回预审：丢弃投稿与媒体文件，reason 为可留空的驳回理由 */
+  rejectPending(pendingId: number, operator: string, reason: string): Promise<ConsoleOpResult>
 }
 
 export interface ConsoleBottleSummary {
@@ -92,6 +103,8 @@ export interface ConsoleStats {
   banned: number
   /** 待处理举报数：举报数达到阈值且未处理 */
   pendingReports: number
+  /** 待审投稿数（预审积压是可见的运维信号） */
+  pendingSubmissions: number
 }
 
 export interface ListBottlesQuery {
@@ -108,6 +121,33 @@ export interface ListBottlesResult {
   bottles: ConsoleBottleSummary[]
 }
 
+export interface ConsolePendingSummary {
+  pendingId: number
+  authorId: string
+  type: string
+  title: string | null
+  preview: string
+  notifyAuthor: boolean
+  createdAt: number
+}
+
+export interface ConsolePendingDetail {
+  pendingId: number
+  authorId: string
+  type: string
+  title: string | null
+  text: string | null
+  images: Array<string | null>
+  audio: string | null
+  notifyAuthor: boolean
+  createdAt: number
+}
+
+export interface ListPendingResult {
+  total: number
+  pendings: ConsolePendingSummary[]
+}
+
 export type ConsoleOpResult = { ok: true } | { ok: false; reason: string }
 
 const DEFAULT_PAGE_SIZE = 20
@@ -122,14 +162,14 @@ function reportPendingFor(deps: ConsoleServiceDeps, bottle: DiftInfo): boolean {
   return isReportPending(deps.reportRegistry.get('local', String(bottle.id)), deps.threshold)
 }
 
-function buildPreview(bottle: DiftInfo): string {
-  const text = bottle.content.text?.trim()
+function buildPreview(content: DiftInfo['content']): string {
+  const text = content.text?.trim()
   if (text) {
     return text.length > PREVIEW_LENGTH ? text.slice(0, PREVIEW_LENGTH) + '…' : text
   }
-  if (bottle.content.title?.trim()) return bottle.content.title.trim()
-  if (bottle.content.audio?.length) return '[音频]'
-  if (bottle.content.image?.length) return '[图片]'
+  if (content.title?.trim()) return content.title.trim()
+  if (content.audio?.length) return '[音频]'
+  if (content.image?.length) return '[图片]'
   return '[空瓶子]'
 }
 
@@ -150,7 +190,59 @@ export class ConsoleService {
       if (bottle.show) visible++
       if (reportPendingFor(this.deps, bottle)) pendingReports++
     }
-    return { total: bottles.length, visible, banned: bottles.length - visible, pendingReports }
+    return {
+      total: bottles.length,
+      visible,
+      banned: bottles.length - visible,
+      pendingReports,
+      pendingSubmissions: this.deps.getPendingSubmissions().length,
+    }
+  }
+
+  listPending(): ListPendingResult {
+    const pendings = this.deps.getPendingSubmissions()
+      .slice()
+      .sort((a, b) => b.pendingId - a.pendingId)
+      .map((pending) => ({
+        pendingId: pending.pendingId,
+        authorId: pending.userId,
+        type: this.deps.pendingType(pending),
+        title: pending.content.title ?? null,
+        preview: buildPreview(pending.content),
+        notifyAuthor: pending.notifyAuthor,
+        createdAt: pending.content.creatTime ?? 0,
+      }))
+    return { total: pendings.length, pendings }
+  }
+
+  getPending(pendingId: number): ConsolePendingDetail | null {
+    const pending = this.deps.getPendingSubmissions().find((item) => item.pendingId === pendingId)
+    if (!pending) return null
+    return {
+      pendingId: pending.pendingId,
+      authorId: pending.userId,
+      type: this.deps.pendingType(pending),
+      title: pending.content.title ?? null,
+      text: pending.content.text ?? null,
+      images: (pending.content.image ?? []).map((url) => this.deps.mediaResolver(url, 'image')),
+      audio: (pending.content.audio ?? []).map((url) => this.deps.mediaResolver(url, 'audio'))[0] ?? null,
+      notifyAuthor: pending.notifyAuthor,
+      createdAt: pending.content.creatTime ?? 0,
+    }
+  }
+
+  /** 通过预审：转正语义与面板广播都由 glue 完成，这里只负责存在性检查 */
+  async approvePending(pendingId: number, operator: string): Promise<ConsoleOpResult> {
+    const exists = this.deps.getPendingSubmissions().some((item) => item.pendingId === pendingId)
+    if (!exists) return { ok: false, reason: 'not_found' }
+    return await this.deps.approvePending(pendingId, operator)
+  }
+
+  /** 驳回预审：reason 可留空；面板广播由 glue 完成 */
+  async rejectPending(pendingId: number, operator: string, reason: string): Promise<ConsoleOpResult> {
+    const exists = this.deps.getPendingSubmissions().some((item) => item.pendingId === pendingId)
+    if (!exists) return { ok: false, reason: 'not_found' }
+    return await this.deps.rejectPending(pendingId, operator, reason)
   }
 
   listBottles(query: ListBottlesQuery = {}): ListBottlesResult {
@@ -283,7 +375,7 @@ export class ConsoleService {
       authorId: bottle.userId ?? '',
       type: this.deps.bottleType(bottle),
       title: bottle.content.title ?? null,
-      preview: buildPreview(bottle),
+      preview: buildPreview(bottle.content),
       show: bottle.show,
       creatTime: bottle.content.creatTime ?? 0,
       reviewCount: (bottle.review ?? []).length,

@@ -19,6 +19,7 @@ import {
   escapeQQMarkdownWithLinks,
   fitMarkdownImageDimensions,
   resolveMarkdownImageDimensions,
+  type ImageDataLoader,
   THROW_BOTTLE_CANCEL_VALUE,
   THROW_BOTTLE_SKIP_IMAGE_VALUE,
   THROW_BOTTLE_SKIP_TITLE_VALUE,
@@ -26,6 +27,57 @@ import {
 import { BottleReportRegistry } from '../src/report'
 import { sendProactivePrivateMessage } from '../src/proactive-message'
 import { createAdapterDisplayNameResolver, fetchQqNicknameFromUapis, isNumericQqUserId, pickAdapterDisplayName, withAdapterDisplayNames, withoutAdapterDisplayNames } from '../src/user-name'
+
+const CRC_TABLE = (() => {
+  const table = new Uint32Array(256)
+  for (let n = 0; n < 256; n++) {
+    let c = n
+    for (let k = 0; k < 8; k++) {
+      c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1
+    }
+    table[n] = c >>> 0
+  }
+  return table
+})()
+
+function crc32(bytes: Buffer): number {
+  let crc = 0xffffffff
+  for (const byte of bytes) crc = CRC_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8)
+  return (crc ^ 0xffffffff) >>> 0
+}
+
+/** 构造仅含 IHDR 的最小 PNG，供 image-size 读取宽高 */
+function pngWithSize(width: number, height: number): Uint8Array {
+  const ihdr = Buffer.alloc(13)
+  ihdr.writeUInt32BE(width, 0)
+  ihdr.writeUInt32BE(height, 4)
+  // bit depth 8、color type 6（RGBA），压缩/滤波/隔行保持 0
+  ihdr[8] = 8
+  ihdr[9] = 6
+  const body = Buffer.concat([Buffer.from('IHDR', 'ascii'), ihdr])
+  const length = Buffer.alloc(4)
+  length.writeUInt32BE(ihdr.length, 0)
+  const crc = Buffer.alloc(4)
+  crc.writeUInt32BE(crc32(body), 0)
+  return new Uint8Array(Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    length,
+    body,
+    crc,
+  ]))
+}
+
+/** ImageDataLoader 假实现：按 source 提供图片字节并记录加载顺序，未知 source 视为加载失败 */
+function imageLoaderWith(files: Record<string, Uint8Array>, loaded: string[] = []): ImageDataLoader {
+  return {
+    async get(source: string) {
+      loaded.push(source)
+      const bytes = files[source]
+      if (!bytes) throw new Error('image not found: ' + source)
+      return bytes
+    },
+  }
+}
 
 test('QQ markdown image preserves supplied dimensions and oversized images keep their aspect ratio', () => {
   assert.equal(
@@ -118,28 +170,19 @@ test('local QQ bottle uses mapped Assets URL and does not resend the embedded im
     review: [],
   }
   const loadedSources: string[] = []
-  let disposed = 0
   const bundle = await buildLocalBottleMessages(bottle, 'qq', {
     async transform(content: string) {
       assert.equal(h.parse(content)[0].attrs.src, 'file:///C:/data/a.jpg')
       return h.image('https://assets.example/bottle.jpg').toString()
     },
-  }, {}, {
-    async loadImage(source: string) {
-      loadedSources.push(source)
-      return {
-        naturalWidth: 800,
-        naturalHeight: 600,
-        async dispose() { disposed++ },
-      }
-    },
-  })
+  }, {}, imageLoaderWith({
+    'file:///C:/data/a.jpg': pngWithSize(800, 600),
+  }, loadedSources))
   const markdown = bundle.primary.attrs.markdown.content
   assert.equal(markdown.includes('![漂流瓶图片 1 #800px #600px](https://assets.example/bottle.jpg)'), true)
   assert.equal(markdown.includes('file:///'), false)
   assert.equal(bundle.media.some(element => element.type === 'img'), false)
   assert.deepEqual(loadedSources, ['file:///C:/data/a.jpg'])
-  assert.equal(disposed, 1)
 })
 
 test('local bottle hides deleted comments and caps comment images at 600 by 600', async () => {
@@ -179,11 +222,9 @@ test('local bottle hides deleted comments and caps comment images at 600 by 600'
       transformedSources.push(source)
       return h.image('https://assets.example/' + source.split('/').at(-1)).toString()
     },
-  }, {}, {
-    async loadImage() {
-      return { naturalWidth: 1200, naturalHeight: 900, async dispose() {} }
-    },
-  })
+  }, {}, imageLoaderWith({
+    'file:///C:/data/comment.jpg': pngWithSize(1200, 900),
+  }))
   const markdown = bundle.primary.attrs.markdown.content
   assert.equal(markdown.includes('![留言 1 图片 1 #600px #450px](https://assets.example/comment.jpg)'), true)
   assert.equal(markdown.includes('管理员已删除该条评论'), false)
@@ -201,32 +242,24 @@ test('local bottle hides deleted comments and caps comment images at 600 by 600'
   assert.equal(selection.includes('1. commenter：有图留言'), true)
 })
 
-test('Canvas dimension lookup retries the Assets URL and safely falls back when loading fails', async () => {
+test('image dimension lookup retries the Assets URL and safely falls back when loading fails', async () => {
   const loadedSources: string[] = []
-  const dimensions = await resolveMarkdownImageDimensions('file:///missing.jpg', {
-    async loadImage(source: string) {
-      loadedSources.push(source)
-      if (source.startsWith('file:')) throw new Error('local file unavailable')
-      return {
-        naturalWidth: 500,
-        naturalHeight: 2000,
-        async dispose() {},
-      }
-    },
-  }, 'https://assets.example/missing.jpg')
+  const dimensions = await resolveMarkdownImageDimensions('file:///missing.jpg', imageLoaderWith({
+    'https://assets.example/missing.jpg': pngWithSize(500, 2000),
+  }, loadedSources), 'https://assets.example/missing.jpg')
   assert.deepEqual(loadedSources, ['file:///missing.jpg', 'https://assets.example/missing.jpg'])
   assert.deepEqual(dimensions, { width: 256, height: 1024 })
 
   assert.deepEqual(await resolveMarkdownImageDimensions('broken', {
-    async loadImage() { throw new Error('broken image') },
-  }), { width: 1024, height: 1024 })
+    async get() { throw new Error('broken image') },
+  } as ImageDataLoader), { width: 1024, height: 1024 })
   assert.deepEqual(
-    await resolveMarkdownImageDimensions('comment-without-canvas', undefined, undefined, 600, 600),
+    await resolveMarkdownImageDimensions('comment-without-loader', undefined, undefined, 600, 600),
     { width: 600, height: 600 },
   )
 })
 
-test('cloud QQ bottle uses Canvas dimensions for content and comment images', async () => {
+test('cloud QQ bottle uses image data loader dimensions for content and comment images', async () => {
   const bundle = await buildCloudBottleMessages({
     id: 'cloud-1',
     content: {
@@ -254,16 +287,10 @@ test('cloud QQ bottle uses Canvas dimensions for content and comment images', as
       const source = h.parse(content)[0].attrs.src as string
       return h.image(source.replace('source.example', 'assets.example')).toString()
     },
-  }, {
-    async loadImage(source: string) {
-      const contentImage = source.endsWith('/content.jpg')
-      return {
-        naturalWidth: contentImage ? 2000 : 640,
-        naturalHeight: contentImage ? 1000 : 480,
-        async dispose() {},
-      }
-    },
-  })
+  }, imageLoaderWith({
+    'https://source.example/content.jpg': pngWithSize(2000, 1000),
+    'https://source.example/comment.jpg': pngWithSize(640, 480),
+  }))
   const markdown = bundle.primary.attrs.markdown.content
   assert.equal(markdown.includes('![云漂流瓶图片 1 #1024px #512px](https://assets.example/content.jpg)'), true)
   assert.equal(markdown.includes('![留言 1 图片 1 #600px #450px](https://assets.example/comment.jpg)'), true)

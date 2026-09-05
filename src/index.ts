@@ -13,11 +13,20 @@ import {
   buildLocalBottleMessages,
   buildLogBundle,
   buildMainMenuBundle,
+  buildPendingSubmissionReceipt,
+  buildPreReviewAdminBundle,
+  buildPreReviewNotifyPrompt,
+  buildPreReviewResultPush,
+  buildPreReviewWithdrawListText,
+  buildRejectReasonPrompt,
   buildReportAdminBundle,
   buildStatisticsBundle,
+  buildSubmissionSummary,
   buildThrowBottlePrompt,
   buildThrowBottleResultMessage,
   sendBottleBundle,
+  PRE_REVIEW_NOTIFY_VALUE,
+  REJECT_REASON_SKIP_VALUE,
   THROW_BOTTLE_CANCEL_VALUE,
   THROW_BOTTLE_SKIP_IMAGE_VALUE,
   THROW_BOTTLE_SKIP_TITLE_VALUE,
@@ -25,8 +34,10 @@ import {
   type ImageDataLoader,
   type BottleStatistics,
   type LogDisplayItem,
+  type PendingSubmissionLike,
 } from './message'
 import { BottleReportRegistry, type ReportScope } from './report'
+import { isPreReviewRequired, PendingSubmissionRegistry, type PendingSubmissionRecord } from './pre-review'
 import { sendProactivePrivateMessage } from './proactive-message'
 import { createAdapterDisplayNameResolver, withAdapterDisplayNames, withoutAdapterDisplayNames, type KoishiUserDatabase } from './user-name'
 import { setupConsole, type ConsoleGlue } from './console'
@@ -298,7 +309,9 @@ export function apply(ctx: Context, config: Config) {
     /** 瓶子被管理员解封 */
     JIEFENG = 6,
     /** 评论被封禁 */
-    PLFENGJIN = 7
+    PLFENGJIN = 7,
+    /** 待审投稿被管理员驳回 */
+    BOHUI = 8
   }
 
   /** 日志项信息 */
@@ -314,7 +327,9 @@ export function apply(ctx: Context, config: Config) {
     /** 事件时间 */
     time?: number,
     /** 是否被用户查看 */
-    isNew?: boolean
+    isNew?: boolean,
+    /** 附加说明（如驳回理由），仅作者日志与订阅推送可见 */
+    reason?: string
   }
 
 
@@ -359,7 +374,8 @@ export function apply(ctx: Context, config: Config) {
         bottleId: info.bottleId,
         time: +new Date(),
         bottleType: info.bottleType || '漂流瓶',
-        isNew: true
+        isNew: true,
+        ...(info.reason ? { reason: info.reason } : {})
       }
       this.initUserLogsData(userId)
       this.userIdList[userId].unshift(temp)
@@ -425,6 +441,10 @@ export function apply(ctx: Context, config: Config) {
         case logType.PLFENGJIN:
           temp.info = '你在 ID 为 ' + logItem.bottleId + ' 的 ' + logItem.bottleType + '中的一条留言被' +
             (config.adminQQ.includes(logItem.userId) || isConsoleOperator(logItem.userId) ? '管理员 ' : '瓶子作者 ') + logItem.userId + ' 屏蔽'
+          break
+        case logType.BOHUI:
+          temp.info = '你的待审投稿（编号 ' + logItem.bottleId + '）被管理员 ' + logItem.userId + ' 驳回' +
+            (logItem.reason ? '，理由：' + logItem.reason : '')
           break
         default:
           temp.info = '发生了一些不为人知的事情，无从考究'
@@ -773,8 +793,8 @@ export function apply(ctx: Context, config: Config) {
       notifyPanelChange('unban')
       await session.send(`处理成功，已开放显示 id:${id} 的` + this.driftbottleType(selectContent))
     },
-    /** 将返回的消息记录成瓶子收录格式 */
-    async getContentMakeRecords(session: Session, content: string, title = null) {
+    /** 收集瓶子内容：内容检查 + 媒体下载，不执行入海动作（入海或预审由调用方决定） */
+    async collectBottleContent(session: Session, content: string, title: string | null): Promise<{ ok: true, content: PendingSubmissionRecord['content'] } | { ok: false, msg: string }> {
       const userId = session.userId
       // 收集
       const audioList = h.select(content, 'audio')
@@ -785,7 +805,7 @@ export function apply(ctx: Context, config: Config) {
       let text = h.select(content, 'text')[0]?.attrs.content.trim() || null
 
       if (![audioUrl, imageUrl, text].some(item => item !== null)) {
-        return { code: false, msg: `瓶子没有内容是不允许丢出的噢~ 请为瓶子填写内容。\n可以为 文本+图片 或者 音频` }
+        return { ok: false, msg: `瓶子没有内容是不允许丢出的噢~ 请为瓶子填写内容。\n可以为 文本+图片 或者 音频` }
       }
 
       // 不良内容安全验证
@@ -840,20 +860,26 @@ export function apply(ctx: Context, config: Config) {
         config.deBug && console.log(`图片数据保存本地完成，一共加载成功:${dict.img.ok}个，失败:${dict.img.err}个`);
       }
 
-      // 为瓶子赋予 id
-      const id = ++this.nextId
-      // 撰写信息对象
-      const temp: DiftInfo = {
-        id,
-        getCount: 0,
+      return {
+        ok: true,
         content: {
           creatTime: +new Date(),
           text: tools.sanitizeText(text),
           title: tools.sanitizeText(title),
           image: storeImageUrl.length ? storeImageUrl : null,
           audio: storeAudioUrl.length ? storeAudioUrl : null,
-          userId
         },
+      }
+    },
+    /** 把收集好的内容转正为瓶子：分配 ID、入海、写发布日志 */
+    async finalizeBottle(userId: string, collected: PendingSubmissionRecord['content']): Promise<DiftInfo> {
+      // 为瓶子赋予 id
+      const id = ++this.nextId
+      // 撰写信息对象
+      const temp: DiftInfo = {
+        id,
+        getCount: 0,
+        content: { ...collected, userId },
         show: true,
         userId,
         style: 0,
@@ -869,13 +895,17 @@ export function apply(ctx: Context, config: Config) {
       config.deBug && console.log(JSON.stringify(temp, null, ' '));
 
       // 为自己添加发布日志
-      logs.addLogForEvent(session.userId, {
+      logs.addLogForEvent(userId, {
         type: logType.FABU,
-        userId: session.userId,
+        userId,
         bottleId: temp.id,
         bottleType: this.driftbottleType(temp)
       })
-      return { code: true, msg: `你成功扔出了一个${this.driftbottleType(temp)}\n瓶子ID为：${id}` }
+      return temp
+    },
+    /** 预审通过：待审投稿转正为瓶子入海（媒体文件复用投稿时已下载的副本） */
+    async publishApprovedSubmission(record: PendingSubmissionRecord): Promise<DiftInfo> {
+      return await this.finalizeBottle(record.userId, record.content)
     },
     /** 获得随机瓶子 */
     async randomGetDriftContent(session) {
@@ -1075,8 +1105,8 @@ export function apply(ctx: Context, config: Config) {
         buildHistoryBundle(displayHistory, historyDetailList.length, session.platform),
       )
     },
-    /** 瓶子类型判断 */
-    driftbottleType(temp: DiftInfo) {
+    /** 瓶子类型判断（也适用于待审投稿的内容） */
+    driftbottleType(temp: Pick<DiftInfo, 'content'>) {
       const audioUrl = temp.content.audio
       const imageUrl = temp.content.image
       const text = temp.content.text
@@ -1269,6 +1299,33 @@ export function apply(ctx: Context, config: Config) {
   )
   const cloudBottleCache = new Map<string, WebBottleData>()
 
+  /** 删除待审投稿已下载到本地媒体目录的文件（驳回/撤回时调用，失败只记日志） */
+  const removePendingMedia = async (record: PendingSubmissionRecord) => {
+    const sources = [...(record.content.image || []), ...(record.content.audio || [])]
+    for (const source of sources) {
+      try {
+        const url = new URL(source)
+        if (url.protocol !== 'file:') continue
+        const name = path.basename(decodeURIComponent(url.pathname))
+        if (!name) continue
+        for (const kind of ['image', 'audio'] as const) {
+          const target = path.join(downloadUilts.basePath, kind, name)
+          if (fs.existsSync(target)) fs.unlinkSync(target)
+        }
+        config.deBug && console.log(`已清理待审投稿媒体文件 ${name}`)
+      } catch (error) {
+        config.deBug && console.log(error)
+      }
+    }
+  }
+
+  /** 待审区：与瓶子数据、历史记录平级的独立命名空间，批量上传云瓶不会读取 */
+  const pendingRegistry = new PendingSubmissionRegistry(
+    ctx.localstorage,
+    config.dataPath + '-pre-review/submissions.json',
+    removePendingMedia,
+  )
+
   // 控制台管理面板：仅管理本地瓶，权限只依赖控制台登录
   ctx.plugin(setupConsole, {
     config,
@@ -1283,6 +1340,15 @@ export function apply(ctx: Context, config: Config) {
       },
       logTypes: { ban: logType.SHANCHU, unban: logType.JIEFENG, reviewDeleted: logType.PLFENGJIN },
       reportRegistry,
+      pendingRegistry,
+      approvePending: (pendingId, operator) =>
+        approvePendingSubmission(null, pendingId).then(result =>
+          result.ok ? { ok: true } : { ok: false, reason: 'pending_not_found' },
+        ),
+      rejectPending: (pendingId, operator, reason) =>
+        rejectPendingSubmission(null, operator, pendingId, reason).then(result =>
+          result.ok ? { ok: true } : { ok: false, reason: 'pending_not_found' },
+        ),
       mediaBasePath: downloadUilts.basePath,
       notifyChange: (action) => notifyPanelChange(action),
     } satisfies ConsoleGlue,
@@ -1395,10 +1461,113 @@ export function apply(ctx: Context, config: Config) {
     },
   }
 
+  /** 作者私信推送：QQ 指令与控制台面板共用，失败仅记日志不阻断流程 */
+  function pushAuthorNotice(session: Session | null, userId: string, content: h.Fragment): Promise<boolean> {
+    const bot = session?.bot ?? ctx.bots.find(item => item.platform === 'qq') ?? ctx.bots[0]
+    if (!bot) {
+      ctx.logger(name).warn('当前没有可用机器人，无法向用户 %s 推送预审结果。', userId)
+      return Promise.resolve(false)
+    }
+    return sendProactivePrivateMessage(bot, userId, content)
+      .then(() => true)
+      .catch((error) => {
+        ctx.logger(name).warn(error, '向用户 %s 推送预审结果失败。', userId)
+        return false
+      })
+  }
+
+  /** 新待审投稿产生时主动私信 adminQQ（primary 失败发 fallback） */
+  async function notifyAdminsOfPendingSubmission(session: Session, record: PendingSubmissionRecord): Promise<boolean> {
+    const admins = [...new Set((config.adminQQ || []).filter(Boolean))]
+    if (!admins.length) {
+      ctx.logger(name).warn('有新的待审投稿，但 adminQQ 未配置，无法发送预审通知。')
+      return false
+    }
+    const bundle = buildPreReviewAdminBundle(
+      {
+        pendingId: record.pendingId,
+        authorId: record.userId,
+        summary: buildSubmissionSummary(record.content),
+      },
+      session.platform,
+    )
+    let delivered = 0
+    for (const adminId of admins) {
+      try {
+        await sendProactivePrivateMessage(session.bot, adminId, bundle.primary)
+        delivered++
+      } catch (primaryError) {
+        try {
+          await sendProactivePrivateMessage(session.bot, adminId, bundle.fallback)
+          delivered++
+        } catch (fallbackError) {
+          ctx.logger(name).warn(
+            fallbackError,
+            '向管理员 %s 推送待审投稿通知失败，原始错误：%o',
+            adminId,
+            primaryError,
+          )
+        }
+      }
+    }
+    return delivered > 0
+  }
+
+  /** 通过预审：待审投稿转正为瓶子入海；返回结构化结果供 QQ 指令与控制台共用 */
+  async function approvePendingSubmission(session: Session | null, pendingId: number): Promise<{ ok: boolean, message: string }> {
+    const record = await pendingRegistry.approve(pendingId)
+    if (!record) {
+      return { ok: false, message: '没有找到编号 ' + pendingId + ' 的待审投稿，或它已被处理。' }
+    }
+    const bottle = await driftbottle.publishApprovedSubmission(record)
+    notifyPanelChange('approve-submission')
+    if (record.notifyAuthor) {
+      await pushAuthorNotice(session, record.userId, buildPreReviewResultPush(
+        { pendingId, approved: true, bottleId: bottle.id },
+        session?.platform ?? 'qq',
+      ))
+    }
+    return { ok: true, message: '已通过编号 ' + pendingId + ' 的待审投稿，瓶子已入海，ID 为：' + bottle.id + '。' }
+  }
+
+  /** 驳回预审：丢弃投稿与媒体文件；理由仅进作者日志与订阅推送 */
+  async function rejectPendingSubmission(session: Session | null, operatorId: string, pendingId: number, reason: string): Promise<{ ok: boolean, message: string }> {
+    const record = await pendingRegistry.reject(pendingId)
+    if (!record) {
+      return { ok: false, message: '没有找到编号 ' + pendingId + ' 的待审投稿，或它已被处理。' }
+    }
+    logs.addLogForEvent(record.userId, {
+      type: logType.BOHUI,
+      userId: operatorId,
+      bottleId: pendingId,
+      bottleType: '待审投稿',
+      reason: reason || undefined,
+    })
+    notifyPanelChange('reject-submission')
+    if (record.notifyAuthor) {
+      await pushAuthorNotice(session, record.userId, buildPreReviewResultPush(
+        { pendingId, approved: false, reason: reason || undefined },
+        session?.platform ?? 'qq',
+      ))
+    }
+    return { ok: true, message: '已驳回编号 ' + pendingId + ' 的待审投稿，相关内容已被丢弃。' }
+  }
+
+  /** 作者撤回自己的待审投稿，效果与驳回一致 */
+  async function withdrawPendingSubmission(session: Session, pendingId: number): Promise<string> {
+    const record = await pendingRegistry.withdraw(pendingId, session.userId)
+    if (!record) {
+      return '没有找到编号 ' + pendingId + ' 的待审投稿，或它已被管理员处理，无法撤回。'
+    }
+    notifyPanelChange('withdraw-submission')
+    return '已撤回编号 ' + pendingId + ' 的待审投稿，相关内容已被丢弃。'
+  }
+
   ctx.on('ready', async () => {
     await driftbottle.init()
     await logs.init()
     await reportRegistry.init()
+    await pendingRegistry.init()
     await webBottle.init(ctx, config)
   })
 
@@ -1509,14 +1678,44 @@ export function apply(ctx: Context, config: Config) {
         return
       }
       const skipTitle = titleInput === THROW_BOTTLE_SKIP_TITLE_VALUE || titleInput === '否'
-      if (title && !skipTitle) {
-        title = h.select(title, 'text')[0]?.attrs.content
-        const result = await driftbottle.getContentMakeRecords(session, res, title)
-        await session.send(buildThrowBottleResultMessage(result.msg, session.platform, result.code))
+      const finalTitle = title && !skipTitle
+        ? (h.select(title, 'text')[0]?.attrs.content ?? null)
+        : null
+      const collected = await driftbottle.collectBottleContent(session, res, finalTitle)
+      if (collected.ok === false) {
+        await session.send(buildThrowBottleResultMessage(collected.msg, session.platform, false))
         return
       }
-      const result = await driftbottle.getContentMakeRecords(session, res)
-      await session.send(buildThrowBottleResultMessage(result.msg, session.platform, result.code))
+
+      // 自动内容安全审核实际不可用时，非管理员扔瓶进入人工预审（见 docs/adr/0001）
+      if (isPreReviewRequired(config) && !config.adminQQ.includes(session.userId)) {
+        await session.send(buildPreReviewNotifyPrompt(session.platform))
+        const notifyInput = await session.prompt(20000)
+        const notifyAuthor = notifyInput?.trim() === PRE_REVIEW_NOTIFY_VALUE
+        const record = await pendingRegistry.submit({
+          userId: session.userId,
+          content: collected.content,
+          notifyAuthor,
+        })
+        await sendBottleBundle(
+          session,
+          buildPendingSubmissionReceipt(
+            record.pendingId,
+            driftbottle.driftbottleType({ content: record.content }),
+            session.platform,
+          ),
+        )
+        await notifyAdminsOfPendingSubmission(session, record)
+        notifyPanelChange('submit-submission')
+        return
+      }
+
+      const bottle = await driftbottle.finalizeBottle(session.userId, collected.content)
+      await session.send(buildThrowBottleResultMessage(
+        '你成功扔出了一个' + driftbottle.driftbottleType(bottle) + '\n瓶子ID为：' + bottle.id,
+        session.platform,
+        true,
+      ))
     })
 
   ctx
@@ -1537,6 +1736,73 @@ export function apply(ctx: Context, config: Config) {
       }
       pid = Math.abs(Math.floor(pid))
       return await driftbottle.openCententById(session, pid)
+    })
+
+  ctx
+    .command('漂流瓶/通过投稿 <pendingId:number>', '通过指定待审编号的投稿，使其入海')
+    .action(async ({ session }, pendingId) => {
+      if (!config.adminQQ.includes(session.userId)) {
+        return '您并未管理员，无权操作...'
+      }
+      if (pendingId == undefined) {
+        return '请携带待审编号，例如：通过投稿 1'
+      }
+      pendingId = Math.abs(Math.floor(pendingId))
+      const result = await approvePendingSubmission(session, pendingId)
+      await session.send(buildAuxiliaryMessage(result.message, session.platform))
+    })
+
+  ctx
+    .command('漂流瓶/驳回投稿 <pendingId:number>', '驳回指定待审编号的投稿，可附带理由')
+    .action(async ({ session }, pendingId) => {
+      if (!config.adminQQ.includes(session.userId)) {
+        return '您并未管理员，无权操作...'
+      }
+      if (pendingId == undefined) {
+        return '请携带待审编号，例如：驳回投稿 1'
+      }
+      pendingId = Math.abs(Math.floor(pendingId))
+      await session.send(buildRejectReasonPrompt(pendingId, session.platform))
+      const reasonInput = await session.prompt(20000)
+      if (reasonInput === undefined) {
+        await session.send('操作超时，结束处理')
+        return
+      }
+      const rawReason = (h.select(reasonInput, 'text')[0]?.attrs.content ?? reasonInput).trim()
+      const reason = !rawReason || rawReason === REJECT_REASON_SKIP_VALUE || rawReason === '否' ? '' : rawReason
+      const result = await rejectPendingSubmission(session, session.userId, pendingId, reason)
+      await session.send(buildAuxiliaryMessage(result.message, session.platform))
+    })
+
+  ctx
+    .command('漂流瓶/撤回投稿 [pendingId:number]', '撤回自己的待审投稿')
+    .action(async ({ session }, pendingId) => {
+      if (pendingId != undefined) {
+        pendingId = Math.abs(Math.floor(pendingId))
+        return await withdrawPendingSubmission(session, pendingId)
+      }
+      const mine = pendingRegistry.listByUser(session.userId)
+      if (!mine.length) {
+        return '你当前没有待审投稿。'
+      }
+      await session.send(buildAuxiliaryMessage(
+        buildPreReviewWithdrawListText(mine, session.platform === 'qq'),
+        session.platform,
+      ))
+      const input = await session.prompt(20000)
+      if (input === undefined) {
+        await session.send('操作超时，结束处理')
+        return
+      }
+      const withdrawId = Math.floor(Number(input))
+      const target = Number.isInteger(withdrawId)
+        ? mine.find((record) => record.pendingId === withdrawId)
+        : null
+      if (!target) {
+        await session.send('未命中任意投稿编号，主动操作结束。')
+        return
+      }
+      return await withdrawPendingSubmission(session, target.pendingId)
     })
 
   ctx

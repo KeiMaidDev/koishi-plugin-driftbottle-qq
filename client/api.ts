@@ -3,11 +3,14 @@ import type {} from '@koishijs/plugin-console'
 import type {
   ConsoleBottleDetail,
   ConsoleFilter,
+  ConsolePendingDetail,
+  ConsolePendingSummary,
   ConsoleStats,
   ListBottlesResult,
+  ListPendingResult,
 } from '../src/console-service'
 
-export type { ConsoleBottleDetail, ConsoleFilter, ConsoleStats, ListBottlesResult }
+export type { ConsoleBottleDetail, ConsoleFilter, ConsolePendingDetail, ConsolePendingSummary, ConsoleStats, ListBottlesResult, ListPendingResult }
 
 declare module '@koishijs/plugin-console' {
   interface Events {
@@ -19,6 +22,10 @@ declare module '@koishijs/plugin-console' {
     'driftbottle-console/delete-review'(id: number, reviewIndex: number): Promise<unknown>
     'driftbottle-console/dismiss-report'(id: number): Promise<unknown>
     'driftbottle-console/media-token'(): string
+    'driftbottle-console/pending-list'(): ListPendingResult
+    'driftbottle-console/pending-detail'(pendingId: number): ConsolePendingDetail | null
+    'driftbottle-console/approve-pending'(pendingId: number): Promise<unknown>
+    'driftbottle-console/reject-pending'(pendingId: number, reason: string): Promise<unknown>
   }
 }
 
@@ -38,3 +45,7 @@ export const unbanBottle = (id: number) => send('driftbottle-console/unban', id)
 export const deleteReview = (id: number, reviewIndex: number) => send('driftbottle-console/delete-review', id, reviewIndex)
 export const dismissReport = (id: number) => send('driftbottle-console/dismiss-report', id)
 export const fetchMediaToken = () => send('driftbottle-console/media-token')
+export const fetchPendingList = () => send('driftbottle-console/pending-list')
+export const fetchPendingDetail = (pendingId: number) => send('driftbottle-console/pending-detail', pendingId)
+export const approvePending = (pendingId: number) => send('driftbottle-console/approve-pending', pendingId)
+export const rejectPending = (pendingId: number, reason: string) => send('driftbottle-console/reject-pending', pendingId, reason)

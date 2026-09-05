@@ -675,6 +675,219 @@ export function buildThrowBottleResultMessage(
   })
 }
 
+/** 预审相关消息构造所需的最小内容形状（与瓶子 content 对齐） */
+export interface SubmissionContentLike {
+  text: string | null
+  title: string | null
+  image: readonly string[] | null
+  audio: readonly string[] | null
+}
+
+export const WITHDRAW_SUBMISSION_BUTTON_VALUE = '撤回投稿'
+export const PRE_REVIEW_NOTIFY_VALUE = '推送预审结果'
+export const PRE_REVIEW_MUTE_VALUE = '不用推送'
+export const REJECT_REASON_SKIP_VALUE = '跳过理由'
+
+const SUBMISSION_PREVIEW_LENGTH = 50
+
+/** 待审投稿的内容摘要：优先文本，退化为媒体标记 */
+export function buildSubmissionSummary(content: SubmissionContentLike): string {
+  const text = content.text?.trim()
+  if (text) {
+    return text.length > SUBMISSION_PREVIEW_LENGTH ? text.slice(0, SUBMISSION_PREVIEW_LENGTH) + '…' : text
+  }
+  if (content.title?.trim()) return content.title.trim()
+  if (content.audio?.length) return '[音频]'
+  if (content.image?.length) return '[图片]'
+  return '[空投稿]'
+}
+
+function createPendingSubmissionReceiptKeyboard(): QQKeyboard {
+  return {
+    content: {
+      rows: [
+        { buttons: [commandButton('撤回投稿', WITHDRAW_SUBMISSION_BUTTON_VALUE, true, 0)] },
+        { buttons: [commandButton('返回菜单', '漂流瓶', true, 0)] },
+      ],
+    },
+  }
+}
+
+/** 作者投稿回执：只含待审编号与摘要语义，绝不出现瓶子 ID（通过预审前尚无瓶子） */
+export function buildPendingSubmissionReceipt(
+  pendingId: number,
+  bottleType: string,
+  platform: string,
+): BottleMessageBundle {
+  const fallbackText = [
+    '【投稿已提交】',
+    '待审编号：' + pendingId,
+    '类型：' + bottleType,
+    '',
+    '当前无法自动审核内容，你的投稿将由管理员预审，通过后才会进入大海。',
+    '发送“撤回投稿”可以撤回该投稿。',
+  ].join('\n')
+  const fallback = h('message', {}, [h.text(fallbackText)])
+  if (platform !== 'qq') return { primary: fallback, media: [], fallback, fallbackMedia: [] }
+  const markdown = [
+    '# 投稿已提交',
+    '> 待审编号：' + pendingId + ' ｜ 类型：' + escapeQQMarkdown(bottleType),
+    '',
+    '当前无法自动审核内容，你的投稿将由管理员预审，通过后才会进入大海。',
+    '发送“撤回投稿”可以撤回该投稿。',
+  ].join('\n')
+  return {
+    primary: h('qq:rawmarkdown', {
+      markdown: { content: markdown },
+      keyboard: createPendingSubmissionReceiptKeyboard(),
+    }),
+    media: [],
+    fallback,
+    fallbackMedia: [],
+  }
+}
+
+/** 询问作者是否订阅预审结果私信推送，默认不推送 */
+export function buildPreReviewNotifyPrompt(platform: string): ReturnType<typeof h> {
+  const fallbackText = [
+    '【预审结果推送】',
+    '需要管理员把预审结果私信推送给你吗？默认不推送。',
+    '请在 20 秒内选择。',
+  ].join('\n')
+  if (platform !== 'qq') return h.text(fallbackText)
+  return h('qq:rawmarkdown', {
+    markdown: {
+      content: [
+        '# 预审结果推送',
+        '> 需要管理员把预审结果私信推送给你吗？默认不推送。',
+        '',
+        '请在 20 秒内选择。',
+      ].join('\n'),
+    },
+    keyboard: {
+      content: {
+        rows: [
+          { buttons: [commandButton('推送预审结果', PRE_REVIEW_NOTIFY_VALUE, true), commandButton('不用推送', PRE_REVIEW_MUTE_VALUE, true, 0)] },
+        ],
+      },
+    },
+  })
+}
+
+export interface PreReviewAdminNotice {
+  pendingId: number
+  authorId: string
+  summary: string
+}
+
+function createPreReviewAdminKeyboard(pendingId: number): QQKeyboard {
+  return {
+    content: {
+      rows: [
+        {
+          buttons: [
+            commandButton('通过投稿', '通过投稿 ' + pendingId, true),
+            commandButton('驳回投稿', '驳回投稿 ' + pendingId, true, 0),
+          ],
+        },
+      ],
+    },
+  }
+}
+
+/** 管理员待审通知：含待审编号与内容摘要，附通过/驳回按钮 */
+export function buildPreReviewAdminBundle(
+  notice: PreReviewAdminNotice,
+  platform: string,
+): BottleMessageBundle {
+  const fallbackText = [
+    '【漂流瓶待审投稿】',
+    '待审编号：' + notice.pendingId,
+    '作者：' + notice.authorId,
+    '内容摘要：' + notice.summary,
+    '请管理员尽快预审，通过或驳回该投稿。',
+  ].join('\n')
+  const fallback = h('message', {}, [h.text(fallbackText)])
+  if (platform !== 'qq') return { primary: fallback, media: [], fallback, fallbackMedia: [] }
+  const markdown = [
+    '# 漂流瓶待审投稿',
+    '> 待审编号：' + notice.pendingId + ' ｜ 作者：' + escapeQQMarkdown(notice.authorId),
+    '',
+    buildMarkdownCodeBlock(notice.summary),
+    '',
+    '请管理员尽快预审该投稿。',
+  ].join('\n')
+  return {
+    primary: h('qq:rawmarkdown', {
+      markdown: { content: markdown },
+      keyboard: createPreReviewAdminKeyboard(notice.pendingId),
+    }),
+    media: [],
+    fallback,
+    fallbackMedia: [],
+  }
+}
+
+/** 驳回理由输入提示：固定进入一轮，可跳过（理由留空） */
+export function buildRejectReasonPrompt(pendingId: number, platform: string): ReturnType<typeof h> {
+  const fallbackText = [
+    '【驳回投稿 ' + pendingId + '】',
+    '请输入该投稿的驳回理由，20 秒内发送；理由可以留空。',
+    '不需要理由时，可以点击“跳过理由”。',
+  ].join('\n')
+  if (platform !== 'qq') return h.text(fallbackText)
+  return h('qq:rawmarkdown', {
+    markdown: {
+      content: [
+        '# 驳回投稿 ' + pendingId,
+        '> 请输入该投稿的驳回理由，20 秒内发送；理由可以留空。',
+        '',
+        '不需要理由时，可以点击“跳过理由”。',
+      ].join('\n'),
+    },
+    keyboard: {
+      content: {
+        rows: [{ buttons: [commandButton('跳过理由', REJECT_REASON_SKIP_VALUE, true, 0)] }],
+      },
+    },
+  })
+}
+
+/** 作者待审投稿列表（撤回用），交互对齐「删留言」的序号选择 */
+export function buildPreReviewWithdrawListText(records: PendingSubmissionLike[], markdown: boolean): string {
+  if (!records.length) {
+    return markdown
+      ? '# 撤回投稿\n> 你当前没有待审投稿。'
+      : '【撤回投稿】\n你当前没有待审投稿。'
+  }
+  const lines = records.map((record) => {
+    const raw = '编号 ' + record.pendingId + '：' + buildSubmissionSummary(record.content)
+    return markdown ? escapeQQMarkdownWithLinks(raw) : raw
+  })
+  return [
+    ...(markdown ? ['# 撤回投稿', '> 以下是你名下的待审投稿，', ''] : ['【撤回投稿】', '以下是你名下的待审投稿：', '']),
+    ...lines,
+    '',
+    '请发送需要撤回的投稿编号。',
+  ].join('\n')
+}
+
+export interface PendingSubmissionLike {
+  pendingId: number
+  content: SubmissionContentLike
+}
+
+/** 预审结果私信推送（仅订阅了推送的作者会收到） */
+export function buildPreReviewResultPush(
+  result: { pendingId: number; approved: boolean; bottleId?: number; reason?: string },
+  platform: string,
+): ReturnType<typeof h> {
+  const text = result.approved
+    ? '你的待审投稿（编号 ' + result.pendingId + '）已通过预审，瓶子已入海，ID 为：' + result.bottleId
+    : '你的待审投稿（编号 ' + result.pendingId + '）未通过预审。' + (result.reason ? '\n驳回理由：' + result.reason : '')
+  return buildAuxiliaryMessage(text, platform)
+}
+
 function historyTypeIcon(type: HistoryInfoList['type']) {
   if (type === '语音瓶') return '🎧'
   if (type === '图片瓶') return '🖼️'

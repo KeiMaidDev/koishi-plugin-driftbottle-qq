@@ -6,15 +6,18 @@ import type {} from '@koishijs/console'
 import type {} from '@koishijs/plugin-server'
 import type { Config, DiftInfo } from './index'
 import type { BottleReportRegistry } from './report'
+import type { PendingSubmissionRegistry } from './pre-review'
 import {
   ConsoleService,
   consoleOperator,
   type ConsoleBottleDetail,
   type ConsoleLogInfo,
   type ConsoleOpResult,
+  type ConsolePendingDetail,
   type ConsoleStats,
   type ListBottlesQuery,
   type ListBottlesResult,
+  type ListPendingResult,
   type PanelChangeAction,
 } from './console-service'
 
@@ -28,6 +31,10 @@ declare module '@koishijs/console' {
     'driftbottle-console/delete-review'(id: number, reviewIndex: number): Promise<ConsoleOpResult>
     'driftbottle-console/dismiss-report'(id: number): Promise<ConsoleOpResult>
     'driftbottle-console/media-token'(): string
+    'driftbottle-console/pending-list'(): ListPendingResult
+    'driftbottle-console/pending-detail'(pendingId: number): ConsolePendingDetail | null
+    'driftbottle-console/approve-pending'(pendingId: number): Promise<ConsoleOpResult>
+    'driftbottle-console/reject-pending'(pendingId: number, reason: string): Promise<ConsoleOpResult>
   }
 }
 
@@ -38,13 +45,18 @@ export interface ConsoleGlue {
   driftbottle: {
     GetAllBottle(): DiftInfo[]
     updateStoreUser(userId: string): Promise<void>
-    driftbottleType(bottle: DiftInfo): string
+    driftbottleType(bottle: Pick<DiftInfo, 'content'>): string
   }
   logs: {
     addLogForEvent(userId: string, info: ConsoleLogInfo): void
   }
   logTypes: { ban: number; unban: number; reviewDeleted: number }
   reportRegistry: BottleReportRegistry
+  pendingRegistry: PendingSubmissionRegistry
+  /** 通过预审：转正语义由主入口实现（分配 ID、入海、写日志、订阅推送） */
+  approvePending(pendingId: number, operator: string): Promise<ConsoleOpResult>
+  /** 驳回预审：reason 可留空 */
+  rejectPending(pendingId: number, operator: string, reason: string): Promise<ConsoleOpResult>
   /** 多媒体文件根目录（downloadUilts.basePath） */
   mediaBasePath: string
   /** QQ 端操作引起的数据变更广播入口 */
@@ -64,6 +76,7 @@ const opErrors: Record<string, string> = {
   invalid_review: '没有找到对应的留言。',
   already_deleted: '该留言已经是删除状态。',
   no_report: '该漂流瓶没有举报记录。',
+  pending_not_found: '没有找到对应的待审投稿。',
 }
 
 /**
@@ -104,6 +117,10 @@ export const setupConsole = Object.assign(
     logTypes: glue.logTypes,
     mediaResolver: toMediaRoutePath,
     notifyChange: (action) => glue.notifyChange(action),
+    getPendingSubmissions: () => glue.pendingRegistry.listAll(),
+    pendingType: (pending) => glue.driftbottle.driftbottleType(pending),
+    approvePending: (pendingId, operator) => glue.approvePending(pendingId, operator),
+    rejectPending: (pendingId, operator, reason) => glue.rejectPending(pendingId, operator, reason),
   })
 
   const operatorOf = (client: ConsoleClientRef) => consoleOperator(client.auth?.name ?? 'unknown')
@@ -133,6 +150,24 @@ export const setupConsole = Object.assign(
     if (result.ok === false) throw new Error(opErrors[result.reason])
     // 忽略举报没有对应的用户日志类型，写入服务端日志供追责
     logger.info('%s 忽略了漂流瓶 %s 的举报', operator, id)
+    return result
+  })
+
+  ctx.console.addListener(`${CONSOLE_API_PREFIX}/pending-list`, () => service.listPending())
+  ctx.console.addListener(`${CONSOLE_API_PREFIX}/pending-detail`, (pendingId) =>
+    service.getPending(Number(pendingId)))
+  ctx.console.addListener(`${CONSOLE_API_PREFIX}/approve-pending`, async function (pendingId) {
+    const operator = operatorOf(this)
+    const result = await service.approvePending(Number(pendingId), operator)
+    if (result.ok === false) throw new Error(opErrors[result.reason])
+    logger.info('%s 通过了待审投稿 %s', operator, pendingId)
+    return result
+  })
+  ctx.console.addListener(`${CONSOLE_API_PREFIX}/reject-pending`, async function (pendingId, reason) {
+    const operator = operatorOf(this)
+    const result = await service.rejectPending(Number(pendingId), operator, String(reason ?? ''))
+    if (result.ok === false) throw new Error(opErrors[result.reason])
+    logger.info('%s 驳回了待审投稿 %s%s', operator, pendingId, reason ? `，理由：${reason}` : '（未附理由）')
     return result
   })
 
