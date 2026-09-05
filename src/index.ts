@@ -29,6 +29,8 @@ import {
 import { BottleReportRegistry, type ReportScope } from './report'
 import { sendProactivePrivateMessage } from './proactive-message'
 import { createAdapterDisplayNameResolver, withAdapterDisplayNames, withoutAdapterDisplayNames, type KoishiUserDatabase } from './user-name'
+import { setupConsole, type ConsoleGlue } from './console'
+import { isConsoleOperator, type PanelChangeAction } from './console-service'
 
 export const name = 'smmcat-driftbottle'
 
@@ -72,6 +74,19 @@ export interface Config {
 export const inject = {
   required: ['localstorage'],
   optional: ['assets', 'database'],
+}
+
+/** 数据变更广播中心：QQ 端操作与控制台面板操作都从这里通知面板刷新 */
+const changeListeners = new Set<(action: PanelChangeAction) => void>()
+let notifyPanelError = (error: unknown) => console.error(error)
+function notifyPanelChange(action: PanelChangeAction) {
+  for (const listener of changeListeners) {
+    try {
+      listener(action)
+    } catch (error) {
+      notifyPanelError(error)
+    }
+  }
 }
 
 export const usage = `
@@ -173,6 +188,8 @@ export type DiftInfo = {
 }
 export function apply(ctx: Context, config: Config) {
 
+  // 面板广播兜底日志走 koishi logger，避免裸 console 输出
+  notifyPanelError = (error) => ctx.logger(name).warn('漂流瓶面板刷新广播失败: %o', error)
 
 
 
@@ -407,7 +424,7 @@ export function apply(ctx: Context, config: Config) {
           break
         case logType.PLFENGJIN:
           temp.info = '你在 ID 为 ' + logItem.bottleId + ' 的 ' + logItem.bottleType + '中的一条留言被' +
-            (config.adminQQ.includes(logItem.userId) ? '管理员 ' : '瓶子作者 ') + logItem.userId + ' 屏蔽'
+            (config.adminQQ.includes(logItem.userId) || isConsoleOperator(logItem.userId) ? '管理员 ' : '瓶子作者 ') + logItem.userId + ' 屏蔽'
           break
         default:
           temp.info = '发生了一些不为人知的事情，无从考究'
@@ -627,6 +644,11 @@ export function apply(ctx: Context, config: Config) {
       if (!selectContent) {
         return `查找失败，没有找到对应id为 ${id} 的瓶子`
       }
+      // 举报已闭环（网页封禁或忽略过）时，QQ 端审核按钮提示已处理，两个处理入口不打架
+      const reportRecord = reportRegistry.get('local', String(selectContent.id))
+      if (reportRecord?.resolvedAt) {
+        return `id为 ${id} 的漂流瓶举报已被处理，无需重复操作。`
+      }
       if (!selectContent.show) {
         return `id为 ${id} 目前的状态已经是关闭显示的状态，无需再次关闭`
       }
@@ -641,6 +663,9 @@ export function apply(ctx: Context, config: Config) {
         bottleId: selectContent.id,
         bottleType: this.driftbottleType(selectContent)
       })
+      // 封禁即处理举报：闭环举报记录，不再重复通知
+      await reportRegistry.resolve('local', String(selectContent.id))
+      notifyPanelChange('ban')
       await session.send(`处理成功，已关闭显示 id:${id} 的` + this.driftbottleType(selectContent))
     },
     /** 管理员删除留言 */
@@ -717,6 +742,7 @@ export function apply(ctx: Context, config: Config) {
       })
 
       this.updateStoreUser(selectContent.userId)
+      notifyPanelChange('delete-review')
       await session.send(`操作结果：\n\n${dict.join('\n')}`)
     },
     /** 解封漂流瓶 */
@@ -744,6 +770,7 @@ export function apply(ctx: Context, config: Config) {
         bottleId: selectContent.id,
         bottleType: this.driftbottleType(selectContent)
       })
+      notifyPanelChange('unban')
       await session.send(`处理成功，已开放显示 id:${id} 的` + this.driftbottleType(selectContent))
     },
     /** 将返回的消息记录成瓶子收录格式 */
@@ -1242,6 +1269,32 @@ export function apply(ctx: Context, config: Config) {
   )
   const cloudBottleCache = new Map<string, WebBottleData>()
 
+  // 控制台管理面板：仅管理本地瓶，权限只依赖控制台登录
+  ctx.plugin(setupConsole, {
+    config,
+    glue: {
+      driftbottle: {
+        GetAllBottle: () => driftbottle.GetAllBottle(),
+        updateStoreUser: (userId) => driftbottle.updateStoreUser(userId),
+        driftbottleType: (bottle) => driftbottle.driftbottleType(bottle),
+      },
+      logs: {
+        addLogForEvent: (userId, info) => logs.addLogForEvent(userId, info),
+      },
+      logTypes: { ban: logType.SHANCHU, unban: logType.JIEFENG, reviewDeleted: logType.PLFENGJIN },
+      reportRegistry,
+      mediaBasePath: downloadUilts.basePath,
+      notifyChange: (action) => notifyPanelChange(action),
+    } satisfies ConsoleGlue,
+  })
+  const broadcastChange = (action: string) => {
+    ctx.get('console')?.broadcast('driftbottle-console/changed', { action, at: +new Date() })
+  }
+  changeListeners.add(broadcastChange)
+  ctx.on('dispose', () => {
+    changeListeners.delete(broadcastChange)
+  })
+
   const reports = {
     rememberCloudBottle(bottle: WebBottleData) {
       cloudBottleCache.set(String(bottle.id), bottle)
@@ -1315,6 +1368,8 @@ export function apply(ctx: Context, config: Config) {
       if (result.duplicate) {
         return '你已经举报过这个漂流瓶，请等待管理员处理。'
       }
+      // 新举报到达时通知控制台面板刷新（本地瓶才在面板范围内）
+      if (scope === 'local') notifyPanelChange('report')
 
       let notificationText = ''
       if (result.shouldNotify) {

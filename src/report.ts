@@ -12,6 +12,8 @@ export interface BottleReportRecord {
   updatedAt: number
   notifiedAt?: number
   notificationPending?: boolean
+  /** 举报被处理（封禁或忽略）的时间；存在即表示举报已闭环，不再重复通知 */
+  resolvedAt?: number
 }
 
 export interface ReportSubmitResult {
@@ -22,6 +24,12 @@ export interface ReportSubmitResult {
 
 function reportKey(scope: ReportScope, bottleId: string) {
   return scope + ':' + bottleId
+}
+
+/** 待处理举报口径：举报数达到阈值且未被处理（封禁或忽略） */
+export function isReportPending(record: Pick<BottleReportRecord, 'reporterIds' | 'resolvedAt'> | undefined, threshold: number): boolean {
+  if (!record || record.resolvedAt) return false
+  return record.reporterIds.length >= Math.max(1, Math.floor(threshold || 1))
 }
 
 function normalizeRecord(value: unknown): BottleReportRecord | null {
@@ -39,6 +47,7 @@ function normalizeRecord(value: unknown): BottleReportRecord | null {
     notifiedAt: typeof source.notifiedAt === 'number' ? source.notifiedAt : undefined,
     // A process restart means an in-flight notification is no longer running.
     notificationPending: false,
+    resolvedAt: typeof source.resolvedAt === 'number' ? source.resolvedAt : undefined,
   }
 }
 
@@ -91,6 +100,7 @@ export class BottleReportRegistry {
       const shouldNotify = record.reporterIds.length >= this.threshold
         && !record.notifiedAt
         && !record.notificationPending
+        && !record.resolvedAt
       if (shouldNotify) record.notificationPending = true
       this.records[key] = record
       await this.save()
@@ -106,6 +116,19 @@ export class BottleReportRegistry {
       if (success) record.notifiedAt = Date.now()
       record.updatedAt = Date.now()
       await this.save()
+    })
+  }
+
+  /** 标记举报为已处理（封禁或忽略），闭环后不再重复通知；返回是否存在记录 */
+  async resolve(scope: ReportScope, bottleId: string): Promise<boolean> {
+    return await this.exclusive(async () => {
+      const record = this.records[reportKey(scope, bottleId)]
+      if (!record) return false
+      record.resolvedAt = Date.now()
+      record.notificationPending = false
+      record.updatedAt = Date.now()
+      await this.save()
+      return true
     })
   }
 

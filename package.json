@@ -6,8 +6,12 @@
   "typings": "lib/index.d.ts",
   "files": [
     "lib",
-    "dist"
+    "dist",
+    "client"
   ],
+  "scripts": {
+    "build:client": "esbuild client/index.ts --bundle --format=esm --platform=browser --target=es2020 --charset=utf8 --outfile=dist/index.js --external:vue --external:@koishijs/client"
+  },
   "license": "MIT",
   "keywords": [
     "chatbot",
@@ -17,10 +21,21 @@
     "markdown",
     "driftbottle"
   ],
+  "koishi": {
+    "public": [
+      "dist"
+    ],
+    "service": {
+      "optional": [
+        "console"
+      ]
+    }
+  },
   "dependencies": {
     "image-size": "2.0.2"
   },
   "peerDependencies": {
+    "@koishijs/plugin-console": "^5.28.0",
     "koishi": "^4.18.7"
   }
 }
