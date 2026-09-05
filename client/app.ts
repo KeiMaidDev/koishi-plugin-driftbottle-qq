@@ -4,6 +4,8 @@ import * as api from './api'
 
 const el = (name: string) => resolveComponent(name)
 
+type PanelTab = 'bottles' | 'pending'
+
 const COLORS = {
   danger: '#f56c6c',
   info: '#909399',
@@ -28,6 +30,7 @@ function formatTime(time: number): string {
 export default defineComponent({
   name: 'DriftbottlePanel',
   setup() {
+    const activeTab = ref<PanelTab>('bottles')
     const stats = ref<api.ConsoleStats | null>(null)
     const list = ref<api.ListBottlesResult | null>(null)
     const query = reactive({
@@ -43,7 +46,6 @@ export default defineComponent({
     const mediaToken = ref('')
     const pendingList = ref<api.ListPendingResult | null>(null)
     const pendingDetail = ref<api.ConsolePendingDetail | null>(null)
-    const pendingDetailVisible = ref(false)
     const pendingDetailLoading = ref(false)
 
     const mediaUrl = (url: string | null) => {
@@ -88,9 +90,24 @@ export default defineComponent({
       }
     }
 
+    async function refreshPendingDetail() {
+      const current = pendingDetail.value
+      if (!current) return
+      try {
+        const next = await api.fetchPendingDetail(current.pendingId)
+        // 请求期间用户可能已切换详情；null 表示投稿已被处理，清空右侧详情
+        if (pendingDetail.value?.pendingId === current.pendingId) {
+          pendingDetail.value = next
+          audioBroken.value = false
+        }
+      } catch (error) {
+        message.error('加载投稿详情失败：' + errText(error))
+      }
+    }
+
     async function openPendingDetail(row: { pendingId: number }) {
       pendingDetailLoading.value = true
-      pendingDetailVisible.value = true
+      pendingDetail.value = null
       try {
         pendingDetail.value = await api.fetchPendingDetail(row.pendingId)
       } catch (error) {
@@ -145,11 +162,26 @@ export default defineComponent({
     const deleteReview = (d: api.ConsoleBottleDetail, review: { userId: string; index: number }) =>
       confirmThen(`确认删除瓶子 #${d.id} 中 ${review.userId || '匿名用户'} 的留言吗？`, () => api.deleteReview(d.id, review.index), '留言已删除')
 
-    const approvePendingAction = (pending: { pendingId: number }) =>
-      confirmThen(`确认通过待审投稿 #${pending.pendingId} 吗？通过后投稿将转正为瓶子入海。`, async () => {
+    const approvePendingAction = async (pending: { pendingId: number }) => {
+      try {
+        await messageBox.confirm(`确认通过待审投稿 #${pending.pendingId} 吗？通过后投稿将转正为瓶子入海。`, '操作确认', {
+          type: 'warning',
+          confirmButtonText: '确认',
+          cancelButtonText: '取消',
+        })
+      } catch {
+        return
+      }
+      try {
         await api.approvePending(pending.pendingId)
-        await refreshPending()
-      }, '投稿已通过')
+        message.success('投稿已通过')
+      } catch (error) {
+        message.error(errText(error))
+      }
+      await refreshPending()
+      await refreshStatsAndList()
+      await refreshPendingDetail()
+    }
 
     // 驳回理由可留空：不设置输入校验，取消即放弃操作
     const rejectPendingAction = async (pending: { pendingId: number }) => {
@@ -172,6 +204,8 @@ export default defineComponent({
         message.error(errText(error))
       }
       await refreshPending()
+      await refreshStatsAndList()
+      await refreshPendingDetail()
     }
 
     function applySearch() {
@@ -191,6 +225,7 @@ export default defineComponent({
         refreshStatsAndList()
         refreshDetail()
         refreshPending()
+        refreshPendingDetail()
       })
       try {
         mediaToken.value = await api.fetchMediaToken()
@@ -200,8 +235,11 @@ export default defineComponent({
       await refreshStatsAndList()
     })
 
-    const statItem = (label: string, value: number | undefined, color: string) =>
-      h('div', { style: 'min-width:88px;text-align:center;' }, [
+    const statItem = (label: string, value: number | undefined, color: string, onClick?: () => void) =>
+      h('div', {
+        style: `min-width:88px;text-align:center;${onClick ? 'cursor:pointer;' : ''}`,
+        onClick,
+      }, [
         h('div', { style: `font-size:22px;font-weight:600;color:${color}` }, value === undefined ? '—' : String(value)),
         h('div', { style: 'font-size:12px;color:#909399;margin-top:2px' }, label),
       ])
@@ -351,16 +389,9 @@ export default defineComponent({
       ]))
     }
 
-    const renderPendingPane = () => {
+    const renderPendingListPane = () => {
       const pendings = pendingList.value?.pendings ?? []
-      return h(el('el-card'), { shadow: 'never', style: 'width:100%' }, () => [
-        h('div', { style: 'display:flex;align-items:center;gap:8px;margin-bottom:10px' }, [
-          h('span', { style: 'font-weight:600;font-size:14px' }, '待审投稿'),
-          pendings.length
-            ? h(el('el-tag'), { type: 'danger', size: 'small' }, () => String(pendings.length))
-            : null,
-          h('span', { style: 'font-size:12px;color:#909399' }, '自动内容安全审核不可用时，用户投稿需在此通过预审后才会入海。'),
-        ]),
+      return h('div', { style: 'flex:1.4;min-width:280px' }, [
         pendings.length
           ? h(el('el-table'), {
               data: pendings,
@@ -393,17 +424,18 @@ export default defineComponent({
       ])
     }
 
-    const renderPendingDetailDialog = () => h(el('el-dialog'), {
-      modelValue: pendingDetailVisible.value,
-      title: pendingDetail.value ? '待审投稿 #' + pendingDetail.value.pendingId : '待审投稿详情',
-      width: '520px',
-      'onUpdate:modelValue': (value: boolean) => { pendingDetailVisible.value = value },
-    }, () => {
+    const renderPendingDetailPane = () => {
       const d = pendingDetail.value
-      if (pendingDetailLoading.value) return h('div', { style: 'padding:12px;color:#909399' }, '正在加载详情...')
-      if (!d) return h(el('el-empty'), { description: '没有找到对应的待审投稿。' })
-      return h('div', { style: 'display:flex;flex-direction:column;gap:10px' }, [
+      if (pendingDetailLoading.value) {
+        return h(el('el-card'), { shadow: 'never', style: 'flex:1;min-width:280px' }, () => '正在加载详情...')
+      }
+      if (!d) {
+        return h(el('el-card'), { shadow: 'never', style: 'flex:1;min-width:280px' }, () =>
+          h(el('el-empty'), { description: '点击左侧待审投稿查看详情' }))
+      }
+      return h(el('el-card'), { shadow: 'never', style: 'flex:1;min-width:280px' }, () => h('div', { style: 'display:flex;flex-direction:column;gap:10px' }, [
         h('div', [
+          h('span', { style: 'font-weight:600;font-size:16px;margin-right:6px' }, '#' + d.pendingId),
           statusTag(d.type, 'primary'),
           d.notifyAuthor ? statusTag('订阅结果推送', 'info') : null,
         ]),
@@ -415,17 +447,17 @@ export default defineComponent({
           ? h('div', { style: 'display:flex;gap:6px;flex-wrap:wrap' }, d.images.map((url, index) => mediaImage(url, index)))
           : null,
         d.audio ? renderAudio(d.audio) : null,
-        h('div', { style: 'display:flex;gap:8px;justify-content:flex-end' }, [
+        h('div', { style: 'display:flex;gap:8px' }, [
           h(el('el-button'), { size: 'small', type: 'success', plain: true, onClick: () => approvePendingAction(d) }, () => '通过'),
           h(el('el-button'), { size: 'small', type: 'danger', plain: true, onClick: () => rejectPendingAction(d) }, () => '驳回'),
         ]),
-      ])
-    })
+      ]))
+    }
 
     return () => {
       const st = stats.value
       return h(el('k-layout'), () => h('div', { style: 'padding:16px;display:flex;flex-direction:column;gap:12px;height:100%;box-sizing:border-box' }, [
-        // 顶部统计条
+        // 顶部统计条（两个 Tab 共享；待审投稿可点击跳转）
         h('div', {
           style: 'display:flex;gap:24px;align-items:center;flex-wrap:wrap;background:#fff;border:1px solid #ebeef5;border-radius:6px;padding:12px 20px',
         }, [
@@ -433,39 +465,58 @@ export default defineComponent({
           statItem('正常', st?.visible, COLORS.success),
           statItem('已封禁', st?.banned, COLORS.info),
           statItem('待处理举报', st?.pendingReports, st?.pendingReports ? COLORS.danger : COLORS.success),
-          statItem('待审投稿', st?.pendingSubmissions, st?.pendingSubmissions ? COLORS.danger : COLORS.success),
+          statItem('待审投稿', st?.pendingSubmissions, st?.pendingSubmissions ? COLORS.danger : COLORS.success, () => { activeTab.value = 'pending' }),
         ]),
-        // 筛选与搜索
-        h('div', { style: 'display:flex;gap:12px;align-items:center;flex-wrap:wrap' }, [
-          h(el('el-radio-group'), {
-            modelValue: query.filter,
-            size: 'small',
-            'onUpdate:modelValue': onFilterChange,
-          }, () => [
-            h(el('el-radio-button'), { value: 'all' }, () => '全部'),
-            h(el('el-radio-button'), { value: 'reported' }, () => '被举报'),
-            h(el('el-radio-button'), { value: 'banned' }, () => '已封禁'),
-          ]),
-          h(el('el-input'), {
-            modelValue: searchInput.value,
-            placeholder: '按瓶子 ID / 作者 ID 搜索',
-            clearable: true,
-            size: 'small',
-            style: 'width:240px',
-            'onUpdate:modelValue': (value: string) => { searchInput.value = value },
-            onKeydown: (event: KeyboardEvent) => { if (event.key === 'Enter') applySearch() },
-            onClear: applySearch,
-          }),
-          h(el('el-button'), { size: 'small', type: 'primary', plain: true, onClick: applySearch }, () => '搜索'),
+        // Tab 切换
+        h(el('el-radio-group'), {
+          modelValue: activeTab.value,
+          size: 'small',
+          'onUpdate:modelValue': (value: PanelTab) => { activeTab.value = value },
+        }, () => [
+          h(el('el-radio-button'), { value: 'bottles' }, () => '瓶子管理'),
+          h(el('el-radio-button'), { value: 'pending' }, () =>
+            '待审投稿' + (st?.pendingSubmissions ? '（' + st.pendingSubmissions + '）' : '')),
         ]),
-        // 列表 + 详情两栏（窄屏自动纵向堆叠）
-        h('div', { style: 'display:flex;gap:12px;align-items:flex-start;flex:1;min-height:0;flex-wrap:wrap' }, [
-          renderListPane(),
-          renderDetailPane(),
-        ]),
-        // 待审投稿区块与详情对话框
-        renderPendingPane(),
-        renderPendingDetailDialog(),
+        activeTab.value === 'bottles'
+          ? h('div', { style: 'display:flex;flex-direction:column;gap:12px;flex:1;min-height:0' }, [
+              // 筛选与搜索
+              h('div', { style: 'display:flex;gap:12px;align-items:center;flex-wrap:wrap' }, [
+                h(el('el-radio-group'), {
+                  modelValue: query.filter,
+                  size: 'small',
+                  'onUpdate:modelValue': onFilterChange,
+                }, () => [
+                  h(el('el-radio-button'), { value: 'all' }, () => '全部'),
+                  h(el('el-radio-button'), { value: 'reported' }, () => '被举报'),
+                  h(el('el-radio-button'), { value: 'banned' }, () => '已封禁'),
+                ]),
+                h(el('el-input'), {
+                  modelValue: searchInput.value,
+                  placeholder: '按瓶子 ID / 作者 ID 搜索',
+                  clearable: true,
+                  size: 'small',
+                  style: 'width:240px',
+                  'onUpdate:modelValue': (value: string) => { searchInput.value = value },
+                  onKeydown: (event: KeyboardEvent) => { if (event.key === 'Enter') applySearch() },
+                  onClear: applySearch,
+                }),
+                h(el('el-button'), { size: 'small', type: 'primary', plain: true, onClick: applySearch }, () => '搜索'),
+              ]),
+              // 列表 + 详情两栏（窄屏自动纵向堆叠）
+              h('div', { style: 'display:flex;gap:12px;align-items:flex-start;flex:1;min-height:0;flex-wrap:wrap' }, [
+                renderListPane(),
+                renderDetailPane(),
+              ]),
+            ])
+          : h('div', { style: 'display:flex;flex-direction:column;gap:12px;flex:1;min-height:0' }, [
+              h('div', { style: 'font-size:12px;color:#909399' },
+                '自动内容安全审核不可用时，用户投稿需在此通过预审后才会入海。'),
+              // 待审列表 + 待审详情两栏（与瓶子管理结构对称）
+              h('div', { style: 'display:flex;gap:12px;align-items:flex-start;flex:1;min-height:0;flex-wrap:wrap' }, [
+                renderPendingListPane(),
+                renderPendingDetailPane(),
+              ]),
+            ]),
       ]))
     }
   },

@@ -18,6 +18,7 @@ import {
   buildPreReviewNotifyPrompt,
   buildPreReviewResultPush,
   buildPreReviewWithdrawListText,
+  buildPreReviewWithdrawSuccess,
   buildRejectReasonPrompt,
   buildReportAdminBundle,
   buildStatisticsBundle,
@@ -1553,14 +1554,17 @@ export function apply(ctx: Context, config: Config) {
     return { ok: true, message: '已驳回编号 ' + pendingId + ' 的待审投稿，相关内容已被丢弃。' }
   }
 
-  /** 作者撤回自己的待审投稿，效果与驳回一致 */
-  async function withdrawPendingSubmission(session: Session, pendingId: number): Promise<string> {
+  /** 作者撤回自己的待审投稿，效果与驳回一致；返回消息元素供指令直接发送 */
+  async function withdrawPendingSubmission(session: Session, pendingId: number): Promise<ReturnType<typeof h>> {
     const record = await pendingRegistry.withdraw(pendingId, session.userId)
     if (!record) {
-      return '没有找到编号 ' + pendingId + ' 的待审投稿，或它已被管理员处理，无法撤回。'
+      return buildAuxiliaryMessage(
+        '没有找到编号 ' + pendingId + ' 的待审投稿，或它已被管理员处理，无法撤回。',
+        session.platform,
+      )
     }
     notifyPanelChange('withdraw-submission')
-    return '已撤回编号 ' + pendingId + ' 的待审投稿，相关内容已被丢弃。'
+    return buildPreReviewWithdrawSuccess(pendingId, session.platform)
   }
 
   ctx.on('ready', async () => {

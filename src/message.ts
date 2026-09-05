@@ -724,7 +724,7 @@ export function buildPendingSubmissionReceipt(
     '待审编号：' + pendingId,
     '类型：' + bottleType,
     '',
-    '当前无法自动审核内容，你的投稿将由管理员预审，通过后才会进入大海。',
+    '你的投稿将由管理员预审，通过后才会进入大海。',
     '发送“撤回投稿”可以撤回该投稿。',
   ].join('\n')
   const fallback = h('message', {}, [h.text(fallbackText)])
@@ -733,7 +733,7 @@ export function buildPendingSubmissionReceipt(
     '# 投稿已提交',
     '> 待审编号：' + pendingId + ' ｜ 类型：' + escapeQQMarkdown(bottleType),
     '',
-    '当前无法自动审核内容，你的投稿将由管理员预审，通过后才会进入大海。',
+    '你的投稿将由管理员预审，通过后才会进入大海。',
     '发送“撤回投稿”可以撤回该投稿。',
   ].join('\n')
   return {
@@ -752,6 +752,7 @@ export function buildPreReviewNotifyPrompt(platform: string): ReturnType<typeof 
   const fallbackText = [
     '【预审结果推送】',
     '需要管理员把预审结果私信推送给你吗？默认不推送。',
+    '请确保您已在私聊添加机器人，否则可能会推送失败。',
     '请在 20 秒内选择。',
   ].join('\n')
   if (platform !== 'qq') return h.text(fallbackText)
@@ -760,6 +761,7 @@ export function buildPreReviewNotifyPrompt(platform: string): ReturnType<typeof 
       content: [
         '# 预审结果推送',
         '> 需要管理员把预审结果私信推送给你吗？默认不推送。',
+        '> 请确保您已在私聊添加机器人，否则可能会推送失败。',
         '',
         '请在 20 秒内选择。',
       ].join('\n'),
@@ -853,20 +855,38 @@ export function buildRejectReasonPrompt(pendingId: number, platform: string): Re
   })
 }
 
-/** 作者待审投稿列表（撤回用），交互对齐「删留言」的序号选择 */
+/** 撤回列表最多展示的待审投稿条数，超出只保留最近的记录 */
+export const PRE_REVIEW_WITHDRAW_LIST_LIMIT = 20
+
+/** QQ 官方 qqbot-cmd-input 交互标签：点击后把撤回指令回填到用户输入框（text 需 urlencode，见 QQ 文本交互文档） */
+export function buildQQWithdrawCommandInput(pendingId: number): string {
+  const command = '漂流瓶/撤回投稿 ' + pendingId
+  return '<qqbot-cmd-input text="' + encodeURIComponent(command) + '" show="' + encodeURIComponent('撤回投稿 ' + pendingId) + '" reference="false" />'
+}
+
+/** 作者待审投稿列表（撤回用），交互对齐「删留言」的序号选择；QQ 平台逐条附回填指令标签 */
 export function buildPreReviewWithdrawListText(records: PendingSubmissionLike[], markdown: boolean): string {
   if (!records.length) {
     return markdown
-      ? '# 撤回投稿\n> 你当前没有待审投稿。'
+      ? '# 📥 你的待审投稿\n> 你当前没有待审投稿。'
       : '【撤回投稿】\n你当前没有待审投稿。'
   }
-  const lines = records.map((record) => {
+  const visible = records.slice(-PRE_REVIEW_WITHDRAW_LIST_LIMIT)
+  const hiddenCount = records.length - visible.length
+  const lines = visible.map((record) => {
     const raw = '编号 ' + record.pendingId + '：' + buildSubmissionSummary(record.content)
-    return markdown ? escapeQQMarkdownWithLinks(raw) : raw
+    const text = markdown ? escapeQQMarkdownWithLinks(raw) : raw
+    // 交互标签必须在转义之后插入，否则会被 markdown 转义破坏
+    return markdown ? text + ' ' + buildQQWithdrawCommandInput(record.pendingId) : text
   })
   return [
-    ...(markdown ? ['# 撤回投稿', '> 以下是你名下的待审投稿，', ''] : ['【撤回投稿】', '以下是你名下的待审投稿：', '']),
+    ...(markdown
+      ? ['# 📥 你的待审投稿', '> 以下是你名下的待审投稿，点击“撤回投稿 N”可回填撤回指令。', '']
+      : ['【撤回投稿】', '以下是你名下的待审投稿：', '']),
     ...lines,
+    ...(hiddenCount > 0
+      ? ['', '（仅展示最近 ' + PRE_REVIEW_WITHDRAW_LIST_LIMIT + ' 条，已省略更早的 ' + hiddenCount + ' 条。）']
+      : []),
     '',
     '请发送需要撤回的投稿编号。',
   ].join('\n')
@@ -877,15 +897,35 @@ export interface PendingSubmissionLike {
   content: SubmissionContentLike
 }
 
-/** 预审结果私信推送（仅订阅了推送的作者会收到） */
+/** 作者撤回成功的回执：QQ 用 emoji 标题 + 引用块排版，其他平台纯文本且文案一致 */
+export function buildPreReviewWithdrawSuccess(pendingId: number, platform: string): ReturnType<typeof h> {
+  if (platform === 'qq') {
+    return h('qq:rawmarkdown-without-keyboard', {
+      content: '# 📌 已撤回\n> 编号 ' + pendingId + ' 的待审投稿已丢弃。',
+    })
+  }
+  return h.text('已撤回编号 ' + pendingId + ' 的待审投稿，相关内容已被丢弃。')
+}
+
+/** 预审结果私信推送（仅订阅了推送的作者会收到）：QQ 用 emoji 标题 + 引用块排版 */
 export function buildPreReviewResultPush(
   result: { pendingId: number; approved: boolean; bottleId?: number; reason?: string },
   platform: string,
 ): ReturnType<typeof h> {
+  if (platform === 'qq') {
+    const content = result.approved
+      ? '# ✅ 投稿已入海\n> 待审编号 ' + result.pendingId + ' → 瓶子 ID ' + result.bottleId
+      : [
+          '# ❌ 未通过预审',
+          '> 待审编号：' + result.pendingId,
+          ...(result.reason ? ['> 驳回理由：' + escapeQQMarkdownWithLinks(result.reason)] : []),
+        ].join('\n')
+    return h('qq:rawmarkdown-without-keyboard', { content })
+  }
   const text = result.approved
     ? '你的待审投稿（编号 ' + result.pendingId + '）已通过预审，瓶子已入海，ID 为：' + result.bottleId
     : '你的待审投稿（编号 ' + result.pendingId + '）未通过预审。' + (result.reason ? '\n驳回理由：' + result.reason : '')
-  return buildAuxiliaryMessage(text, platform)
+  return h.text(text)
 }
 
 function historyTypeIcon(type: HistoryInfoList['type']) {

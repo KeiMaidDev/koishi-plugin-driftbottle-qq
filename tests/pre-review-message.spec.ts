@@ -6,10 +6,13 @@ import {
   buildPreReviewNotifyPrompt,
   buildPreReviewResultPush,
   buildPreReviewWithdrawListText,
+  buildPreReviewWithdrawSuccess,
+  buildQQWithdrawCommandInput,
   buildRejectReasonPrompt,
   buildSubmissionSummary,
   PRE_REVIEW_MUTE_VALUE,
   PRE_REVIEW_NOTIFY_VALUE,
+  PRE_REVIEW_WITHDRAW_LIST_LIMIT,
   REJECT_REASON_SKIP_VALUE,
   WITHDRAW_SUBMISSION_BUTTON_VALUE,
   type SubmissionContentLike,
@@ -99,33 +102,87 @@ test('reject reason prompt provides a skip button', () => {
   assert.equal(String(prompt.attrs.markdown.content).includes('9'), true)
 })
 
-test('withdraw list renders pending numbers with summaries and a selection hint', () => {
+test('withdraw list renders pending numbers with summaries and per-item command inputs', () => {
   const records = [
     { pendingId: 2, content: makeContent({ text: '第二条' }) },
     { pendingId: 5, content: makeContent({ text: null, image: ['file:///a.jpg'] }) },
   ]
   const markdownText = buildPreReviewWithdrawListText(records, true)
+  assert.equal(markdownText.includes('# 📥 你的待审投稿'), true)
   assert.equal(markdownText.includes('编号 2：第二条'), true)
   assert.equal(markdownText.includes('编号 5：\\[图片\\]'), true)
+  assert.equal(markdownText.includes(buildQQWithdrawCommandInput(2)), true)
+  assert.equal(markdownText.includes(buildQQWithdrawCommandInput(5)), true)
+  // 回填指令保持可读：show 文本与待审编号一致
+  assert.equal(markdownText.includes(encodeURIComponent('撤回投稿 5')), true)
   assert.equal(markdownText.includes('请发送需要撤回的投稿编号'), true)
 
-  const plainText = buildPreReviewWithdrawListText([], false)
-  assert.equal(plainText.includes('当前没有待审投稿'), true)
+  const plainText = buildPreReviewWithdrawListText(records, false)
+  assert.equal(plainText.includes('编号 2：第二条'), true)
+  assert.equal(plainText.includes('qqbot-cmd-input'), false)
+  assert.equal(plainText.includes('请发送需要撤回的投稿编号'), true)
+
+  const emptyText = buildPreReviewWithdrawListText([], false)
+  assert.equal(emptyText.includes('当前没有待审投稿'), true)
+})
+
+test('withdraw command input urlencodes the command and keeps reference disabled', () => {
+  const tag = buildQQWithdrawCommandInput(12)
+  assert.equal(tag.includes('text="' + encodeURIComponent('漂流瓶/撤回投稿 12') + '"'), true)
+  assert.equal(tag.includes('show="' + encodeURIComponent('撤回投稿 12') + '"'), true)
+  assert.equal(tag.includes('reference="false"'), true)
+})
+
+test('withdraw list caps at the limit keeping the most recent records', () => {
+  const records = Array.from({ length: PRE_REVIEW_WITHDRAW_LIST_LIMIT + 5 }, (_, index) => ({
+    pendingId: index + 1,
+    content: makeContent(),
+  }))
+  const markdownText = buildPreReviewWithdrawListText(records, true)
+  assert.equal(markdownText.includes('编号 ' + PRE_REVIEW_WITHDRAW_LIST_LIMIT + '：'), true)
+  assert.equal(markdownText.includes('编号 ' + (PRE_REVIEW_WITHDRAW_LIST_LIMIT + 5) + '：'), true)
+  assert.equal(markdownText.includes('编号 1：'), false)
+  assert.equal(markdownText.includes('编号 5：'), false)
+  assert.equal(markdownText.includes('仅展示最近 ' + PRE_REVIEW_WITHDRAW_LIST_LIMIT + ' 条'), true)
+})
+
+test('withdraw success receipt uses markdown on qq and plain text elsewhere', () => {
+  const qq = buildPreReviewWithdrawSuccess(3, 'qq')
+  assert.equal(qq.type === 'qq:rawmarkdown-without-keyboard', true)
+  const qqContent = String(qq.attrs.content)
+  assert.equal(qqContent.includes('# 📌 已撤回'), true)
+  assert.equal(qqContent.includes('编号 3 的待审投稿已丢弃'), true)
+
+  const plain = buildPreReviewWithdrawSuccess(3, 'onebot')
+  assert.equal(String(plain.attrs.content).includes('已撤回编号 3'), true)
 })
 
 test('result push messages carry approval id or rejection reason', () => {
   const approved = buildPreReviewResultPush({ pendingId: 4, approved: true, bottleId: 88 }, 'qq')
   assert.equal(approved.type === 'qq:rawmarkdown-without-keyboard', true)
-  const approvedText = String(approved.attrs.content)
-  assert.equal(approvedText.includes('4'), true)
-  assert.equal(approvedText.includes('88'), true)
-  assert.equal(approvedText.includes('通过'), true)
+  const approvedContent = String(approved.attrs.content)
+  assert.equal(approvedContent.includes('# ✅ 投稿已入海'), true)
+  assert.equal(approvedContent.includes('待审编号 4 → 瓶子 ID 88'), true)
 
-  const rejected = buildPreReviewResultPush({ pendingId: 4, approved: false, reason: '内容不合适' }, 'onebot')
-  const rejectedText = String(rejected.attrs.content)
-  assert.equal(rejectedText.includes('4'), true)
-  assert.equal(rejectedText.includes('内容不合适'), true)
+  const rejected = buildPreReviewResultPush({ pendingId: 4, approved: false, reason: '内容不合适' }, 'qq')
+  const rejectedContent = String(rejected.attrs.content)
+  assert.equal(rejectedContent.includes('# ❌ 未通过预审'), true)
+  assert.equal(rejectedContent.includes('待审编号：4'), true)
+  assert.equal(rejectedContent.includes('驳回理由：内容不合适'), true)
 
-  const rejectedNoReason = buildPreReviewResultPush({ pendingId: 4, approved: false }, 'onebot')
-  assert.equal(String(rejectedNoReason.attrs.content).includes('未通过预审'), true)
+  // 驳回理由经过 markdown 转义
+  const escaped = buildPreReviewResultPush({ pendingId: 4, approved: false, reason: '理由 *加粗*' }, 'qq')
+  assert.equal(String(escaped.attrs.content).includes('理由 \\*加粗\\*'), true)
+
+  const rejectedNoReason = buildPreReviewResultPush({ pendingId: 4, approved: false }, 'qq')
+  assert.equal(String(rejectedNoReason.attrs.content).includes('驳回理由'), false)
+
+  // 非 QQ 平台维持纯文本且文案一致
+  const plainApproved = buildPreReviewResultPush({ pendingId: 4, approved: true, bottleId: 88 }, 'onebot')
+  assert.equal(String(plainApproved.attrs.content).includes('瓶子已入海，ID 为：88'), true)
+
+  const plainRejected = buildPreReviewResultPush({ pendingId: 4, approved: false, reason: '内容不合适' }, 'onebot')
+  const plainRejectedText = String(plainRejected.attrs.content)
+  assert.equal(plainRejectedText.includes('4'), true)
+  assert.equal(plainRejectedText.includes('内容不合适'), true)
 })
