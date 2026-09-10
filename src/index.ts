@@ -1489,6 +1489,7 @@ export function apply(ctx: Context, config: Config) {
         pendingId: record.pendingId,
         authorId: record.userId,
         summary: buildSubmissionSummary(record.content),
+        fullText: record.content.text ?? undefined,
       },
       session.platform,
     )

@@ -40,6 +40,41 @@ test('submission summary prefers text and degrades to media markers', () => {
   assert.equal(buildSubmissionSummary(makeContent({ text: null })), '[空投稿]')
 })
 
+test('admin push carries full text without ellipsis truncation', () => {
+  // 管理员私信推送需要完整内容供预审判断，不能沿用面板摘要的 50 字截断
+  const longText = '长'.repeat(80)
+  const bundle = buildPreReviewAdminBundle({
+    pendingId: 9,
+    authorId: 'author9',
+    summary: buildSubmissionSummary(makeContent({ text: longText })),
+    fullText: longText,
+  }, 'qq')
+  const markdown = bundle.primary.attrs.markdown.content as string
+  assert.equal(markdown.includes('待审编号：9'), true)
+  assert.equal(markdown.includes(longText), true, 'QQ markdown 应包含完整 80 字内容')
+  assert.equal(markdown.includes('…'), false, '不应出现省略号截断')
+
+  const plain = buildPreReviewAdminBundle({
+    pendingId: 9,
+    authorId: 'author9',
+    summary: buildSubmissionSummary(makeContent({ text: longText })),
+    fullText: longText,
+  }, 'onebot')
+  const fallbackText = String(plain.fallback.children[0].attrs.content)
+  assert.equal(fallbackText.includes(longText), true, '纯文本推送应包含完整内容')
+})
+
+test('admin push falls back to summary markers when there is no text', () => {
+  // 无文本投稿（纯图片/音频）时用媒体标记，且完整内容字段缺省时退回摘要
+  const bundle = buildPreReviewAdminBundle({
+    pendingId: 11,
+    authorId: 'author11',
+    summary: buildSubmissionSummary(makeContent({ text: null, image: ['file:///a.jpg'] })),
+  }, 'qq')
+  const markdown = bundle.primary.attrs.markdown.content as string
+  assert.equal(markdown.includes('[图片]'), true)
+})
+
 test('pending receipt includes pending number and withdraw button but never a bottle id', async () => {
   for (const platform of ['qq', 'onebot']) {
     const bundle = buildPendingSubmissionReceipt(3, '图文瓶', platform)

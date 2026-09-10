@@ -232,6 +232,9 @@ export default defineComponent({
       } catch {
         // 拿不到媒体令牌时图片/音频降级为占位，不阻塞面板
       }
+      // 面板打开时主动拉一次待审列表：变更广播只在操作后发出，
+      // 打开面板前发生的审核不会触发广播，不拉取会导致列表空到下一次变更
+      refreshPending()
       await refreshStatsAndList()
     })
 

@@ -779,7 +779,10 @@ export function buildPreReviewNotifyPrompt(platform: string): ReturnType<typeof 
 export interface PreReviewAdminNotice {
   pendingId: number
   authorId: string
+  /** 面板风格摘要（可能带省略号截断），用于退化和无文本场景 */
   summary: string
+  /** 完整文本内容：管理员私信推送需要全文供预审判断，缺省时退回 summary */
+  fullText?: string
 }
 
 function createPreReviewAdminKeyboard(pendingId: number): QQKeyboard {
@@ -797,16 +800,18 @@ function createPreReviewAdminKeyboard(pendingId: number): QQKeyboard {
   }
 }
 
-/** 管理员待审通知：含待审编号与内容摘要，附通过/驳回按钮 */
+/** 管理员待审通知：含待审编号与完整内容（无文本时退化为摘要标记），附通过/驳回按钮 */
 export function buildPreReviewAdminBundle(
   notice: PreReviewAdminNotice,
   platform: string,
 ): BottleMessageBundle {
+  // 推送展示完整内容（摘要的 50 字截断只用于面板列表），无文本投稿退化为媒体标记
+  const body = notice.fullText ?? notice.summary
   const fallbackText = [
     '【漂流瓶待审投稿】',
     '待审编号：' + notice.pendingId,
     '作者：' + notice.authorId,
-    '内容摘要：' + notice.summary,
+    '投稿内容：' + body,
     '请管理员尽快预审，通过或驳回该投稿。',
   ].join('\n')
   const fallback = h('message', {}, [h.text(fallbackText)])
@@ -815,7 +820,7 @@ export function buildPreReviewAdminBundle(
     '# 漂流瓶待审投稿',
     '> 待审编号：' + notice.pendingId + ' ｜ 作者：' + escapeQQMarkdown(notice.authorId),
     '',
-    buildMarkdownCodeBlock(notice.summary),
+    buildMarkdownCodeBlock(body),
     '',
     '请管理员尽快预审该投稿。',
   ].join('\n')

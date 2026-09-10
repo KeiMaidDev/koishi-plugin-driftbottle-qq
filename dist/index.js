@@ -217,6 +217,7 @@ var app_default = defineComponent({
         mediaToken.value = await fetchMediaToken();
       } catch {
       }
+      refreshPending();
       await refreshStatsAndList();
     });
     const statItem = (label, value, color, onClick) => h("div", {
