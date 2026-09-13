@@ -308,6 +308,8 @@ export async function buildLocalBottleMessages(
 ): Promise<BottleMessageBundle> {
   const visibleReviews = bottle.review.filter(item => !item.isDel)
   const commentText = localReviewText(visibleReviews)
+  // 图片瓶/语音瓶正文留空即可，媒体内容随后作为独立消息元素发送
+  const bottleBody = bottle.content.text || ''
   const fallbackText = [
     '【' + (bottle.content.title || '漂流瓶 #' + bottle.id) + '】',
     '编号：' + bottle.id,
@@ -315,7 +317,7 @@ export async function buildLocalBottleMessages(
     '被捞次数：' + bottle.getCount,
     '创建时间：' + formatTime(bottle.content.creatTime),
     '',
-    bottle.content.text || '（无文字内容）',
+    bottleBody,
     '',
     '留言：',
     commentText,
@@ -368,7 +370,7 @@ export async function buildLocalBottleMessages(
     '> 编号：' + bottle.id + ' ｜ 作者：' + escapeQQMarkdown(displayName(bottle.username, bottle.userId)),
     '> 被捞：' + bottle.getCount + ' 次 ｜ 创建时间：' + escapeQQMarkdown(formatTime(bottle.content.creatTime)),
     '',
-    buildMarkdownCodeBlock(bottle.content.text || '（无文字内容）'),
+    ...(bottleBody ? [buildMarkdownCodeBlock(bottleBody)] : []),
     ...(markdownImages.length ? ['', ...markdownImages] : []),
     '',
     '## 留言',
@@ -398,6 +400,8 @@ export async function buildCloudBottleMessages(
     ).join('\n')
     : '暂无留言'
 
+  // 云图片瓶正文留空，图片随后作为独立消息元素发送
+  const bottleBody = bottle.content.text || ''
   const fallbackText = [
     '【' + (bottle.content.title || '云漂流瓶 #' + bottle.id) + '】',
     '编号：' + bottle.id,
@@ -406,7 +410,7 @@ export async function buildCloudBottleMessages(
     '被捞次数：' + bottle.getCount,
     '创建时间：' + formatTime(bottle.content.createTime),
     '',
-    bottle.content.text || '（无文字内容）',
+    bottleBody,
     '',
     '留言：',
     fallbackComments,
@@ -454,7 +458,7 @@ export async function buildCloudBottleMessages(
     '> 来源：' + escapeQQMarkdown(bottle.platform) + ' ｜ 被捞：' + bottle.getCount + ' 次',
     '> 创建时间：' + escapeQQMarkdown(formatTime(bottle.content.createTime)),
     '',
-    buildMarkdownCodeBlock(bottle.content.text || '（无文字内容）'),
+    ...(bottleBody ? [buildMarkdownCodeBlock(bottleBody)] : []),
     ...(contentImages.length ? ['', ...contentImages] : []),
     '',
     '## 留言',
@@ -783,6 +787,8 @@ export interface PreReviewAdminNotice {
   summary: string
   /** 完整文本内容：管理员私信推送需要全文供预审判断，缺省时退回 summary */
   fullText?: string
+  /** 投稿配图：管理员预审需要看到图片内容本体 */
+  images?: readonly string[]
 }
 
 function createPreReviewAdminKeyboard(pendingId: number): QQKeyboard {
@@ -807,18 +813,24 @@ export function buildPreReviewAdminBundle(
 ): BottleMessageBundle {
   // 推送展示完整内容（摘要的 50 字截断只用于面板列表），无文本投稿退化为媒体标记
   const body = notice.fullText ?? notice.summary
+  const noticeImages = (notice.images || []).filter(Boolean)
   const fallbackText = [
     '【漂流瓶待审投稿】',
     '待审编号：' + notice.pendingId,
     '作者：' + notice.authorId,
+    ...(noticeImages.length ? ['配图：' + noticeImages.length + ' 张（见随后发送的图片消息）'] : []),
     '投稿内容：' + body,
     '请管理员尽快预审，通过或驳回该投稿。',
   ].join('\n')
   const fallback = h('message', {}, [h.text(fallbackText)])
-  if (platform !== 'qq') return { primary: fallback, media: [], fallback, fallbackMedia: [] }
+  // 图片始终作为独立媒体消息发送：QQ markdown 卡片不内嵌 file:// 图片，
+  // 无文本投稿也依赖图片本体完成预审
+  const media = imageElements(noticeImages)
+  if (platform !== 'qq') return { primary: fallback, media, fallback, fallbackMedia: media }
   const markdown = [
     '# 漂流瓶待审投稿',
     '> 待审编号：' + notice.pendingId + ' ｜ 作者：' + escapeQQMarkdown(notice.authorId),
+    ...(noticeImages.length ? ['> 配图：' + noticeImages.length + ' 张（见随后发送的图片消息）'] : []),
     '',
     buildMarkdownCodeBlock(body),
     '',
@@ -829,9 +841,9 @@ export function buildPreReviewAdminBundle(
       markdown: { content: markdown },
       keyboard: createPreReviewAdminKeyboard(notice.pendingId),
     }),
-    media: [],
+    media,
     fallback,
-    fallbackMedia: [],
+    fallbackMedia: media,
   }
 }
 

@@ -1490,6 +1490,7 @@ export function apply(ctx: Context, config: Config) {
         authorId: record.userId,
         summary: buildSubmissionSummary(record.content),
         fullText: record.content.text ?? undefined,
+        images: record.content.image ?? undefined,
       },
       session.platform,
     )
@@ -1497,10 +1498,17 @@ export function apply(ctx: Context, config: Config) {
     for (const adminId of admins) {
       try {
         await sendProactivePrivateMessage(session.bot, adminId, bundle.primary)
+        // 待审配图随正文卡片补发，图片瓶必须让管理员看到图片本体
+        for (const element of bundle.media) {
+          await sendProactivePrivateMessage(session.bot, adminId, element)
+        }
         delivered++
       } catch (primaryError) {
         try {
           await sendProactivePrivateMessage(session.bot, adminId, bundle.fallback)
+          for (const element of bundle.fallbackMedia) {
+            await sendProactivePrivateMessage(session.bot, adminId, element)
+          }
           delivered++
         } catch (fallbackError) {
           ctx.logger(name).warn(
