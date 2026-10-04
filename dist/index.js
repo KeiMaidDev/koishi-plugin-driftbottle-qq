@@ -329,7 +329,10 @@ var app_default = defineComponent({
           h("span", { style: "font-weight:600;font-size:16px;margin-right:6px" }, "#" + d.id),
           statusTag(d.type, "primary"),
           statusTag(d.show ? "正常" : "已封禁", d.show ? "success" : "warning"),
-          d.reportCount > 0 ? statusTag("举报 " + d.reportCount + (d.reportPending ? " · 待处理" : " · 已处理"), d.reportPending ? "danger" : "info") : null
+          d.reportCount > 0 ? statusTag(
+            "举报 " + d.reportCount + " · " + (d.reportPending ? "待处理" : d.reportResolved ? "已闭环" : "未达阈值"),
+            d.reportPending ? "danger" : "info"
+          ) : null
         ]),
         h(
           "div",
@@ -338,7 +341,7 @@ var app_default = defineComponent({
         ),
         h("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [
           d.show ? h(el("el-button"), { size: "small", type: "danger", plain: true, onClick: () => banBottle2(d) }, () => "封禁瓶子") : h(el("el-button"), { size: "small", type: "success", plain: true, onClick: () => unbanBottle2(d) }, () => "解封瓶子"),
-          d.reportCount > 0 ? h(el("el-button"), { size: "small", type: "warning", plain: true, onClick: () => dismissReport2(d) }, () => "忽略举报") : null
+          d.reportPending ? h(el("el-button"), { size: "small", type: "warning", plain: true, onClick: () => dismissReport2(d) }, () => "忽略举报") : null
         ]),
         // 正文
         d.title ? h("div", { style: "font-weight:600" }, d.title) : null,
@@ -456,7 +459,7 @@ var app_default = defineComponent({
               "onUpdate:modelValue": onFilterChange
             }, () => [
               h(el("el-radio-button"), { value: "all" }, () => "全部"),
-              h(el("el-radio-button"), { value: "reported" }, () => "被举报"),
+              h(el("el-radio-button"), { value: "reported" }, () => "待处理举报"),
               h(el("el-radio-button"), { value: "banned" }, () => "已封禁")
             ]),
             h(el("el-input"), {

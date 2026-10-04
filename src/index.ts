@@ -4,6 +4,8 @@ import crypto from 'crypto'
 import { pathToFileURL } from 'url'
 import path from 'path'
 import fs from 'fs'
+// 指令配置上的 hidden 字段由 help 插件增强声明，仅类型依赖
+import type {} from '@koishijs/plugin-help'
 import { BottleContent, CommentContent, webBottle, type WebBottleData } from './webBottle'
 import {
   buildAuxiliaryMessage,
@@ -37,7 +39,7 @@ import {
   type LogDisplayItem,
   type PendingSubmissionLike,
 } from './message'
-import { BottleReportRegistry, type ReportScope } from './report'
+import { BottleReportRegistry, isReportResolved, type ReportScope } from './report'
 import { isPreReviewRequired, PendingSubmissionRegistry, type PendingSubmissionRecord } from './pre-review'
 import { sendProactivePrivateMessage } from './proactive-message'
 import { createAdapterDisplayNameResolver, withAdapterDisplayNames, withoutAdapterDisplayNames, type KoishiUserDatabase } from './user-name'
@@ -80,6 +82,7 @@ export interface Config {
   textfilter: Array<string>
   allowDelOfAuthor: boolean,
   reportThreshold: number
+  enableCloudBottle: boolean
   webFilingPath: string
 }
 
@@ -119,6 +122,7 @@ export const Config: Schema<Config> = Schema.object({
   webFilingPath: Schema.string().default('smmcat-driftbottle-upload').description('用户上传到服务器的数据命名空间 (在 /data/localstorage 文件夹下)'),
   allowDelOfAuthor: Schema.boolean().default(true).description('允许漂流瓶的作者删除瓶子下的评论'),
   reportThreshold: Schema.number().step(1).min(1).default(3).description('同一漂流瓶达到该举报数量后，主动通知管理员 QQ 审核'),
+  enableCloudBottle: Schema.boolean().default(true).description('云漂流瓶开关；关闭后主菜单不再出现云瓶入口，四条云瓶指令从帮助中隐藏并统一回执「云漂流瓶功能已关闭。」，云瓶举报一并被拒绝，遗留的云瓶举报记录会被清空。本地瓶不受影响'),
   logsNum: Schema.number().default(20).description('日志最大显示数量'),
   throwWaitTime: Schema.number().default(20000).description('扔漂流瓶的等待时间'),
   scoopWaitTime: Schema.number().default(20000).description('捞漂流瓶的等待时间'),
@@ -1408,6 +1412,9 @@ export function apply(ctx: Context, config: Config) {
         return '举报范围只能是 local（本地瓶）或 cloud（云瓶）。'
       }
 
+      // 云瓶关闭后不留下永远无法闭环的云瓶举报
+      if (scope === 'cloud' && !config.enableCloudBottle) return '云漂流瓶功能已关闭。'
+
       let title = ''
       let authorId = ''
       if (scope === 'local') {
@@ -1576,10 +1583,35 @@ export function apply(ctx: Context, config: Config) {
     return buildPreReviewWithdrawSuccess(pendingId, session.platform)
   }
 
+  /** 管理员忽略举报：只把举报闭环，不改变瓶子本身的任何状态，并广播面板刷新 */
+  async function dismissBottleReport(session: Session, pid: number): Promise<string> {
+    if (!config.adminQQ.includes(session.userId)) {
+      return '您并未管理员，无权操作...'
+    }
+    const record = reportRegistry.get('local', String(pid))
+    if (!record) {
+      return `没有找到 id 为 ${pid} 的举报记录。`
+    }
+    if (isReportResolved(record)) {
+      return `id为 ${pid} 的漂流瓶举报已被处理，无需重复操作。`
+    }
+    await reportRegistry.resolve('local', String(pid))
+    ctx.logger(name).info('%s 忽略了 id 为 %s 的本地瓶举报，瓶子状态未改变。', session.userId, pid)
+    notifyPanelChange('dismiss-report')
+    return `已忽略 id 为 ${pid} 的漂流瓶举报。`
+  }
+
   ctx.on('ready', async () => {
     await driftbottle.init()
     await logs.init()
     await reportRegistry.init()
+    // 云瓶关闭后不再有任何入口能读到或闭环云瓶举报，遗留记录在这里幂等清空
+    if (!config.enableCloudBottle) {
+      const removed = await reportRegistry.removeByScope('cloud')
+      if (removed > 0) {
+        ctx.logger(name).info('云漂流瓶功能已关闭，已清理 %s 条遗留的云瓶举报记录。', removed)
+      }
+    }
     await pendingRegistry.init()
     await webBottle.init(ctx, config)
   })
@@ -1589,7 +1621,7 @@ export function apply(ctx: Context, config: Config) {
     .action(async ({ session }) => {
       await sendBottleBundle(
         session,
-        buildMainMenuBundle(session.platform, driftbottle.getDriftbottleStatistics(session)),
+        buildMainMenuBundle(session.platform, driftbottle.getDriftbottleStatistics(session), config.enableCloudBottle),
       )
     })
 
@@ -1742,6 +1774,16 @@ export function apply(ctx: Context, config: Config) {
     })
 
   ctx
+    .command('漂流瓶/忽略举报 <pid:number>', '忽略指定id漂流瓶的举报，不封禁瓶子')
+    .action(async ({ session }, pid) => {
+      if (pid == undefined) {
+        return `确认你是否携带id参数`
+      }
+      pid = Math.abs(Math.floor(pid))
+      return await dismissBottleReport(session, pid)
+    })
+
+  ctx
     .command('漂流瓶/解漂流瓶 <pid:number>', '为目标id漂流瓶解封')
     .action(async ({ session }, pid) => {
       if (pid == undefined) {
@@ -1867,8 +1909,9 @@ export function apply(ctx: Context, config: Config) {
     })
 
   ctx
-    .command('漂流瓶/捞云漂流瓶 <num:number>')
+    .command('漂流瓶/捞云漂流瓶 <num:number>', { hidden: !config.enableCloudBottle })
     .action(async ({ session }, num) => {
+      if (!config.enableCloudBottle) return '云漂流瓶功能已关闭。'
       const type = cooling.check(session.userId, UseType.LaoPingZi)
       if (!type[0]) {
         return `你捞瓶子的频率太快，请等${Math.ceil(type[1] / 1000)}秒`
@@ -1894,8 +1937,9 @@ export function apply(ctx: Context, config: Config) {
     })
 
   ctx
-    .command('漂流瓶/扔云漂流瓶 <msgContent:text>', '瓶子将扔向更广阔的大海')
+    .command('漂流瓶/扔云漂流瓶 <msgContent:text>', '瓶子将扔向更广阔的大海', { hidden: !config.enableCloudBottle })
     .action(async ({ session }, msgContent) => {
+      if (!config.enableCloudBottle) return '云漂流瓶功能已关闭。'
       const type = cooling.check(session.userId, UseType.RenPingZi)
       if (!type[0]) {
         return `你扔瓶子的频率太快，请等${Math.ceil(type[1] / 1000)}秒`
@@ -1948,8 +1992,9 @@ export function apply(ctx: Context, config: Config) {
     })
 
   ctx
-    .command('漂流瓶/云留言 <pid:number> <content:text>')
+    .command('漂流瓶/云留言 <pid:number> <content:text>', { hidden: !config.enableCloudBottle })
     .action(async ({ session }, pid, content) => {
+      if (!config.enableCloudBottle) return '云漂流瓶功能已关闭。'
       const type = cooling.check(session.userId, UseType.LiuYan)
       if (!type[0]) {
         return `你留言的频率太快，请等${Math.ceil(type[1] / 1000)}秒`
@@ -1964,8 +2009,9 @@ export function apply(ctx: Context, config: Config) {
     })
 
   ctx
-    .command('漂流瓶/批量上传云漂流瓶')
+    .command('漂流瓶/批量上传云漂流瓶', { hidden: !config.enableCloudBottle })
     .action(async ({ session }) => {
+      if (!config.enableCloudBottle) return '云漂流瓶功能已关闭。'
       webBottle.uploadWebBottleData(session, driftbottle.GetAllBottle())
     })
 }

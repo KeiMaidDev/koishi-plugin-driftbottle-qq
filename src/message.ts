@@ -148,17 +148,17 @@ export function createBottleKeyboard(
   return { content: { rows } }
 }
 
-export function createMainKeyboard(): QQKeyboard {
-  return {
-    content: {
-      rows: [
-        { buttons: [commandButton('捞漂流瓶', '捞漂流瓶', true), commandButton('扔漂流瓶', '扔漂流瓶 ', false)] },
-        { buttons: [commandButton('捞云漂流瓶', '捞云漂流瓶', true), commandButton('扔云漂流瓶', '扔云漂流瓶 ', false)] },
-        { buttons: [commandButton('查看记录', '查看瓶子记录', true, 0), commandButton('查看日志', '漂流瓶日志', true, 0)] },
-        { buttons: [commandButton('漂流瓶统计', '漂流瓶统计', true, 0)] },
-      ],
-    },
-  }
+/** 主菜单键盘；云瓶开关关闭时不生成云瓶那一行 */
+export function createMainKeyboard(enableCloudBottle = true): QQKeyboard {
+  const rows: Array<{ buttons: QQKeyboardButton[] }> = [
+    { buttons: [commandButton('捞漂流瓶', '捞漂流瓶', true), commandButton('扔漂流瓶', '扔漂流瓶 ', false)] },
+    ...(enableCloudBottle
+      ? [{ buttons: [commandButton('捞云漂流瓶', '捞云漂流瓶', true), commandButton('扔云漂流瓶', '扔云漂流瓶 ', false)] }]
+      : []),
+    { buttons: [commandButton('查看记录', '查看瓶子记录', true, 0), commandButton('查看日志', '漂流瓶日志', true, 0)] },
+    { buttons: [commandButton('漂流瓶统计', '漂流瓶统计', true, 0)] },
+  ]
+  return { content: { rows } }
 }
 
 function publicHttpUrl(value: string): string | null {
@@ -489,7 +489,11 @@ export interface ReportAdminNotice {
 function createReportReviewKeyboard(scope: ReportScope, bottleId: string): QQKeyboard {
   const viewCommand = scope === 'cloud' ? '捞云漂流瓶 ' + bottleId : '捞漂流瓶 ' + bottleId
   const buttons = [commandButton(scope === 'cloud' ? '查看云瓶' : '查看瓶子', viewCommand, true)]
-  if (scope === 'local') buttons.push(commandButton('封禁瓶子', '封漂流瓶 ' + bottleId, true, 0))
+  if (scope === 'local') {
+    buttons.push(commandButton('封禁瓶子', '封漂流瓶 ' + bottleId, true, 0))
+    // 云瓶举报没有收口路径，只有本地瓶推送才带「忽略举报」
+    buttons.push(commandButton('忽略举报', '忽略举报 ' + bottleId, true, 0))
+  }
   return { content: { rows: [{ buttons }] } }
 }
 
@@ -503,6 +507,7 @@ export function buildReportAdminBundle(notice: ReportAdminNotice, platform: stri
     ...(notice.title ? ['标题：' + notice.title] : []),
     ...(notice.authorId ? ['作者：' + notice.authorId] : []),
     '请管理员尽快查看内容并决定是否处理。',
+    ...(notice.scope === 'local' ? ['如需忽略举报（不封禁瓶子），请发送：忽略举报 ' + notice.bottleId] : []),
   ].join('\n')
   const fallback = h('message', {}, [h.text(fallbackText)])
   if (platform !== 'qq') {
@@ -556,14 +561,16 @@ function buildMainMenuStatisticsText(statistics: BottleStatistics, markdown: boo
 export function buildMainMenuBundle(
   platform: string,
   statistics?: BottleStatistics,
+  enableCloudBottle = true,
 ): BottleMessageBundle {
   const fallbackText = [
     '【漂流瓶】',
     ...(statistics ? [buildMainMenuStatisticsText(statistics, false), ''] : []),
     '捞漂流瓶：从本地大海随机获取一个瓶子',
     '扔漂流瓶：发布本地漂流瓶',
-    '捞云漂流瓶：从云端大海获取瓶子',
-    '扔云漂流瓶：发布云端漂流瓶',
+    ...(enableCloudBottle
+      ? ['捞云漂流瓶：从云端大海获取瓶子', '扔云漂流瓶：发布云端漂流瓶']
+      : []),
     '查看瓶子记录：查看自己捞到过的瓶子',
     '漂流瓶日志：查看漂流瓶事件日志',
   ].join('\n')
@@ -579,7 +586,7 @@ export function buildMainMenuBundle(
   return {
     primary: h('qq:rawmarkdown', {
       markdown: { content: markdown },
-      keyboard: createMainKeyboard(),
+      keyboard: createMainKeyboard(enableCloudBottle),
     }),
     media: [],
     fallback,

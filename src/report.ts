@@ -32,6 +32,11 @@ export function isReportPending(record: Pick<BottleReportRecord, 'reporterIds' |
   return record.reporterIds.length >= Math.max(1, Math.floor(threshold || 1))
 }
 
+/** 举报已闭环口径：管理员已处理过（封禁或忽略），不再重复通知 */
+export function isReportResolved(record: Pick<BottleReportRecord, 'resolvedAt'> | undefined): boolean {
+  return Boolean(record?.resolvedAt)
+}
+
 function normalizeRecord(value: unknown): BottleReportRecord | null {
   if (!value || typeof value !== 'object') return null
   const source = value as Partial<BottleReportRecord>
@@ -135,6 +140,17 @@ export class BottleReportRegistry {
   get(scope: ReportScope, bottleId: string): BottleReportRecord | undefined {
     const record = this.records[reportKey(scope, bottleId)]
     return record ? { ...record, reporterIds: [...record.reporterIds] } : undefined
+  }
+
+  /** 物理删除某个 scope 下的全部举报记录，返回删除条数 */
+  async removeByScope(scope: ReportScope): Promise<number> {
+    return await this.exclusive(async () => {
+      const keys = Object.keys(this.records).filter((key) => this.records[key].scope === scope)
+      if (!keys.length) return 0
+      for (const key of keys) delete this.records[key]
+      await this.save()
+      return keys.length
+    })
   }
 
   private async save() {

@@ -366,7 +366,10 @@ export default defineComponent({
           statusTag(d.type, 'primary'),
           statusTag(d.show ? '正常' : '已封禁', d.show ? 'success' : 'warning'),
           d.reportCount > 0
-            ? statusTag('举报 ' + d.reportCount + (d.reportPending ? ' · 待处理' : ' · 已处理'), d.reportPending ? 'danger' : 'info')
+            ? statusTag(
+                '举报 ' + d.reportCount + ' · ' + (d.reportPending ? '待处理' : d.reportResolved ? '已闭环' : '未达阈值'),
+                d.reportPending ? 'danger' : 'info',
+              )
             : null,
         ]),
         h('div', { style: 'font-size:13px;color:#606266' },
@@ -375,7 +378,7 @@ export default defineComponent({
           d.show
             ? h(el('el-button'), { size: 'small', type: 'danger', plain: true, onClick: () => banBottle(d) }, () => '封禁瓶子')
             : h(el('el-button'), { size: 'small', type: 'success', plain: true, onClick: () => unbanBottle(d) }, () => '解封瓶子'),
-          d.reportCount > 0
+          d.reportPending
             ? h(el('el-button'), { size: 'small', type: 'warning', plain: true, onClick: () => dismissReport(d) }, () => '忽略举报')
             : null,
         ]),
@@ -492,7 +495,7 @@ export default defineComponent({
                   'onUpdate:modelValue': onFilterChange,
                 }, () => [
                   h(el('el-radio-button'), { value: 'all' }, () => '全部'),
-                  h(el('el-radio-button'), { value: 'reported' }, () => '被举报'),
+                  h(el('el-radio-button'), { value: 'reported' }, () => '待处理举报'),
                   h(el('el-radio-button'), { value: 'banned' }, () => '已封禁'),
                 ]),
                 h(el('el-input'), {

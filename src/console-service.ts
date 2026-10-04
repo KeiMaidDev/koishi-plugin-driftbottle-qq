@@ -1,8 +1,8 @@
 import type { DiftInfo } from './index'
-import { isReportPending, type BottleReportRegistry } from './report'
+import { isReportPending, isReportResolved, type BottleReportRegistry } from './report'
 import type { PendingSubmissionRecord } from './pre-review'
 
-/** 控制台列表筛选标签 */
+/** 控制台列表筛选标签；`reported` 的语义是「待处理举报」，与顶部统计同口径 */
 export type ConsoleFilter = 'all' | 'reported' | 'banned'
 
 /** 控制台面板中的操作者身份（写入日志用） */
@@ -94,6 +94,8 @@ export interface ConsoleBottleDetail {
   getCount: number
   reportCount: number
   reportPending: boolean
+  /** 举报是否已闭环（管理员封禁或忽略过） */
+  reportResolved: boolean
   reviews: ConsoleReviewView[]
 }
 
@@ -160,6 +162,10 @@ function reportCountFor(deps: ConsoleServiceDeps, bottle: DiftInfo): number {
 
 function reportPendingFor(deps: ConsoleServiceDeps, bottle: DiftInfo): boolean {
   return isReportPending(deps.reportRegistry.get('local', String(bottle.id)), deps.threshold)
+}
+
+function reportResolvedFor(deps: ConsoleServiceDeps, bottle: DiftInfo): boolean {
+  return isReportResolved(deps.reportRegistry.get('local', String(bottle.id)))
 }
 
 function buildPreview(content: DiftInfo['content']): string {
@@ -251,7 +257,7 @@ export class ConsoleService {
     const filtered = this.deps.getBottles()
       .filter((bottle) => {
         if (filter === 'banned' && bottle.show) return false
-        if (filter === 'reported' && reportCountFor(this.deps, bottle) <= 0) return false
+        if (filter === 'reported' && !reportPendingFor(this.deps, bottle)) return false
         return matchesSearch(bottle, query.search ?? '')
       })
       .sort((a, b) => {
@@ -287,6 +293,7 @@ export class ConsoleService {
       getCount: bottle.getCount ?? 0,
       reportCount: reportCountFor(this.deps, bottle),
       reportPending: reportPendingFor(this.deps, bottle),
+      reportResolved: reportResolvedFor(this.deps, bottle),
       // 已软删除的留言同样返回，由前端展示「已删除」徽标
       reviews: (bottle.review ?? []).map((review, index) => ({
         index,
