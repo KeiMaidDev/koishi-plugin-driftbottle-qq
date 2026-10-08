@@ -1,3 +1,10 @@
+// client/index.ts
+import { store } from "@koishijs/client";
+import { defineComponent as defineComponent2, h as h2 } from "vue";
+
+// src/console-permission.ts
+var CONSOLE_PANEL_AUTHORITY = 1;
+
 // client/app.ts
 import { message, messageBox } from "@koishijs/client";
 import { defineComponent, h, onMounted, reactive, ref, resolveComponent, watch } from "vue";
@@ -501,13 +508,18 @@ var app_default = defineComponent({
 });
 
 // client/index.ts
+var GuardedApp = defineComponent2({
+  name: "DriftbottlePanelGuard",
+  setup: () => () => store.user ? h2(app_default) : null
+});
 var client_default = (ctx) => {
   ctx.page({
     path: "/driftbottle",
     name: "漂流瓶管理",
     order: 5,
-    fields: [],
-    component: app_default
+    // 与面板 RPC 同一门槛：未登录访问会被 plugin-auth 重定向到 /login
+    authority: CONSOLE_PANEL_AUTHORITY,
+    component: GuardedApp
   });
 };
 export {

@@ -5,6 +5,7 @@ import type { Context } from 'koishi'
 import type {} from '@koishijs/console'
 import type {} from '@koishijs/plugin-server'
 import type { Config, DiftInfo } from './index'
+import { CONSOLE_PANEL_AUTHORITY } from './console-permission'
 import type { BottleReportRegistry } from './report'
 import type { PendingSubmissionRegistry } from './pre-review'
 import {
@@ -142,26 +143,28 @@ export const setupConsole = Object.assign(
   })
 
   const operatorOf = (client: ConsoleClientRef) => consoleOperator(client.auth?.name ?? 'unknown')
+  // 面板数据与操作只对已登录控制台用户开放
+  const requireLogin = { authority: CONSOLE_PANEL_AUTHORITY }
 
-  ctx.console.addListener(`${CONSOLE_API_PREFIX}/stats`, () => service.getStats())
-  ctx.console.addListener(`${CONSOLE_API_PREFIX}/list`, (query) => service.listBottles(query ?? {}))
-  ctx.console.addListener(`${CONSOLE_API_PREFIX}/bottle`, (id) => service.getBottle(Number(id)))
+  ctx.console.addListener(`${CONSOLE_API_PREFIX}/stats`, () => service.getStats(), requireLogin)
+  ctx.console.addListener(`${CONSOLE_API_PREFIX}/list`, (query) => service.listBottles(query ?? {}), requireLogin)
+  ctx.console.addListener(`${CONSOLE_API_PREFIX}/bottle`, (id) => service.getBottle(Number(id)), requireLogin)
 
   ctx.console.addListener(`${CONSOLE_API_PREFIX}/ban`, async function (id) {
     const result = await service.banBottle(Number(id), operatorOf(this))
     if (result.ok === false) throw new Error(opErrors[result.reason])
     return result
-  })
+  }, requireLogin)
   ctx.console.addListener(`${CONSOLE_API_PREFIX}/unban`, async function (id) {
     const result = await service.unbanBottle(Number(id), operatorOf(this))
     if (result.ok === false) throw new Error(opErrors[result.reason])
     return result
-  })
+  }, requireLogin)
   ctx.console.addListener(`${CONSOLE_API_PREFIX}/delete-review`, async function (id, reviewIndex) {
     const result = await service.deleteReview(Number(id), Number(reviewIndex), operatorOf(this))
     if (result.ok === false) throw new Error(opErrors[result.reason])
     return result
-  })
+  }, requireLogin)
   ctx.console.addListener(`${CONSOLE_API_PREFIX}/dismiss-report`, async function (id) {
     const operator = operatorOf(this)
     const result = await service.dismissReport(Number(id), operator)
@@ -169,27 +172,27 @@ export const setupConsole = Object.assign(
     // 忽略举报没有对应的用户日志类型，写入服务端日志供追责
     logger.info('%s 忽略了漂流瓶 %s 的举报', operator, id)
     return result
-  })
+  }, requireLogin)
 
-  ctx.console.addListener(`${CONSOLE_API_PREFIX}/pending-list`, () => service.listPending())
+  ctx.console.addListener(`${CONSOLE_API_PREFIX}/pending-list`, () => service.listPending(), requireLogin)
   ctx.console.addListener(`${CONSOLE_API_PREFIX}/pending-detail`, (pendingId) =>
-    service.getPending(Number(pendingId)))
+    service.getPending(Number(pendingId)), requireLogin)
   ctx.console.addListener(`${CONSOLE_API_PREFIX}/approve-pending`, async function (pendingId) {
     const operator = operatorOf(this)
     const result = await service.approvePending(Number(pendingId), operator)
     if (result.ok === false) throw new Error(opErrors[result.reason])
     logger.info('%s 通过了待审投稿 %s', operator, pendingId)
     return result
-  })
+  }, requireLogin)
   ctx.console.addListener(`${CONSOLE_API_PREFIX}/reject-pending`, async function (pendingId, reason) {
     const operator = operatorOf(this)
     const result = await service.rejectPending(Number(pendingId), operator, String(reason ?? ''))
     if (result.ok === false) throw new Error(opErrors[result.reason])
     logger.info('%s 驳回了待审投稿 %s%s', operator, pendingId, reason ? `，理由：${reason}` : '（未附理由）')
     return result
-  })
+  }, requireLogin)
 
-  // 媒体路由令牌：只发给已连接控制台的客户端，未登录控制台拿不到令牌即取不到文件
+  // 媒体路由令牌：只发给已登录的控制台用户，未登录控制台拿不到令牌即取不到文件
   const mediaTokens = new Map<string, number>()
   const pruneMediaTokens = () => {
     const now = Date.now()
@@ -202,7 +205,7 @@ export const setupConsole = Object.assign(
     const token = crypto.randomBytes(16).toString('hex')
     mediaTokens.set(token, Date.now() + MEDIA_TOKEN_TTL)
     return token
-  })
+  }, requireLogin)
 
   ctx.server.get(`/${CONSOLE_API_PREFIX}/media/:kind/:name`, (koaCtx) => {
     const expiry = typeof koaCtx.query.token === 'string' ? mediaTokens.get(koaCtx.query.token) : undefined
