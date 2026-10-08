@@ -1491,21 +1491,24 @@ export function apply(ctx: Context, config: Config) {
       ctx.logger(name).warn('有新的待审投稿，但 adminQQ 未配置，无法发送预审通知。')
       return false
     }
-    const bundle = buildPreReviewAdminBundle(
+    const bundle = await buildPreReviewAdminBundle(
       {
         pendingId: record.pendingId,
         authorId: record.userId,
         summary: buildSubmissionSummary(record.content),
         fullText: record.content.text ?? undefined,
         images: record.content.image ?? undefined,
+        audio: record.content.audio ?? undefined,
       },
       session.platform,
+      (ctx as Context & { assets?: AssetTransformer }).assets,
+      ctx.http as ImageDataLoader,
     )
     let delivered = 0
     for (const adminId of admins) {
       try {
         await sendProactivePrivateMessage(session.bot, adminId, bundle.primary)
-        // 待审配图随正文卡片补发，图片瓶必须让管理员看到图片本体
+        // 无法内嵌进 markdown 的配图与音频随正文卡片补发，图片瓶必须让管理员看到图片本体
         for (const element of bundle.media) {
           await sendProactivePrivateMessage(session.bot, adminId, element)
         }

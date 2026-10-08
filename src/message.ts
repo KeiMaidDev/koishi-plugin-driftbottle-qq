@@ -796,6 +796,8 @@ export interface PreReviewAdminNotice {
   fullText?: string
   /** 投稿配图：管理员预审需要看到图片内容本体 */
   images?: readonly string[]
+  /** 投稿音频：无法内嵌 markdown，只能作为独立媒体消息随附给管理员 */
+  audio?: readonly string[]
 }
 
 function createPreReviewAdminKeyboard(pendingId: number): QQKeyboard {
@@ -813,33 +815,52 @@ function createPreReviewAdminKeyboard(pendingId: number): QQKeyboard {
   }
 }
 
-/** 管理员待审通知：含待审编号与完整内容（无文本时退化为摘要标记），附通过/驳回按钮 */
-export function buildPreReviewAdminBundle(
+/**
+ * 管理员待审通知：含待审编号与完整内容（无文本时退化为摘要标记），附通过/驳回按钮。
+ * QQ 平台优先把图片内嵌进 markdown（需 Assets 提供公网 HTTP(S) 直链），
+ * 解析不出直链的图片与音频降级为独立媒体消息；其他平台全部走独立媒体消息。
+ */
+export async function buildPreReviewAdminBundle(
   notice: PreReviewAdminNotice,
   platform: string,
-): BottleMessageBundle {
+  assets?: AssetTransformer,
+  imageLoader?: ImageDataLoader,
+): Promise<BottleMessageBundle> {
   // 推送展示完整内容（摘要的 50 字截断只用于面板列表），无文本投稿退化为媒体标记
   const body = notice.fullText ?? notice.summary
   const noticeImages = (notice.images || []).filter(Boolean)
+  const noticeAudio = (notice.audio || []).filter(Boolean)
+  const audioMedia = audioElements(noticeAudio)
+  // 图片优先内嵌 markdown：非 QQ 平台不内嵌，QQ 平台只有解析失败的图片才降级为独立消息
+  const failedImages: ReturnType<typeof h>[] = []
+  const markdownImages = platform === 'qq'
+    ? await resolveQqMarkdownImages(noticeImages, assets, imageLoader, failedImages, '投稿图片')
+    : []
+  const standaloneImages = platform === 'qq' ? failedImages : imageElements(noticeImages)
+  // 正常路径只补发未内嵌的图片；兜底路径没有 markdown 内嵌，必须自带全部图片本体
+  const media = [...standaloneImages, ...audioMedia]
+  const fallbackMedia = [...imageElements(noticeImages), ...audioMedia]
+  const mediaNote = [
+    standaloneImages.length ? standaloneImages.length + ' 张图片' : '',
+    noticeAudio.length ? noticeAudio.length + ' 段音频' : '',
+  ].filter(Boolean).join('、')
   const fallbackText = [
     '【漂流瓶待审投稿】',
     '待审编号：' + notice.pendingId,
     '作者：' + notice.authorId,
-    ...(noticeImages.length ? ['配图：' + noticeImages.length + ' 张（见随后发送的图片消息）'] : []),
+    ...(mediaNote ? ['媒体：' + mediaNote + '（见随后发送的媒体消息）'] : []),
     '投稿内容：' + body,
     '请管理员尽快预审，通过或驳回该投稿。',
   ].join('\n')
   const fallback = h('message', {}, [h.text(fallbackText)])
-  // 图片始终作为独立媒体消息发送：QQ markdown 卡片不内嵌 file:// 图片，
-  // 无文本投稿也依赖图片本体完成预审
-  const media = imageElements(noticeImages)
-  if (platform !== 'qq') return { primary: fallback, media, fallback, fallbackMedia: media }
+  if (platform !== 'qq') return { primary: fallback, media, fallback, fallbackMedia }
   const markdown = [
     '# 漂流瓶待审投稿',
     '> 待审编号：' + notice.pendingId + ' ｜ 作者：' + escapeQQMarkdown(notice.authorId),
-    ...(noticeImages.length ? ['> 配图：' + noticeImages.length + ' 张（见随后发送的图片消息）'] : []),
+    ...(mediaNote ? ['> 媒体：' + mediaNote + '（见随后发送的媒体消息）'] : []),
     '',
     buildMarkdownCodeBlock(body),
+    ...(markdownImages.length ? ['', ...markdownImages] : []),
     '',
     '请管理员尽快预审该投稿。',
   ].join('\n')
@@ -850,7 +871,7 @@ export function buildPreReviewAdminBundle(
     }),
     media,
     fallback,
-    fallbackMedia: media,
+    fallbackMedia,
   }
 }
 
